@@ -20,6 +20,12 @@ type AgentEngine struct {
 	WorkDir string
 
 	EnableThinking bool // 慢思考模式开关
+
+	// 后台任务追踪: 引擎自动感知本轮启动的后台进程,并在后续 Turn 中
+	// 当进程退出时主动通知模型 (异步事件注入),无需模型手动轮询 TaskOutput。
+	taskManager       *tools.TaskManager
+	trackedTaskIDs    map[string]struct{} // 本轮启动的 Task ID 集合
+	trackedTaskIDsMu  sync.Mutex
 }
 
 func NewAgentEngine(p provider.LLMProvider, r tools.Registry, workDir string, enableThinking bool) *AgentEngine {
@@ -28,6 +34,8 @@ func NewAgentEngine(p provider.LLMProvider, r tools.Registry, workDir string, en
 		registry:       r,
 		WorkDir:        workDir,
 		EnableThinking: enableThinking,
+		taskManager:    tools.GetTaskManager(),
+		trackedTaskIDs: make(map[string]struct{}),
 	}
 }
 
@@ -35,6 +43,9 @@ func NewAgentEngine(p provider.LLMProvider, r tools.Registry, workDir string, en
 func (e *AgentEngine) Run(ctx context.Context, userPrompt string) error {
 	log.Printf("[Engine] 引擎启动，锁定工作区: %s\n", e.WorkDir)
 	log.Printf("[Engine] 慢思考模式 (Thinking Phase): %v\n", e.EnableThinking)
+
+	// 确保引擎退出时清理所有后台进程
+	defer e.taskManager.Shutdown()
 
 	// 1. 初始化会话的 Context (上下文内存)
 	contextHistory := []schema.Message{
@@ -54,6 +65,12 @@ func (e *AgentEngine) Run(ctx context.Context, userPrompt string) error {
 	for {
 		turnCount++
 		log.Printf("========== [Turn %d] 开始 ==========\n", turnCount)
+
+		// ----------------------------------------------------------------------
+		// 【异步通知机制】在每轮 Turn 开始前,检查本引擎启动的后台进程是否有新退出的,
+		// 如果有,作为 System 消息注入上下文 —— 这样模型无需手动 poll TaskOutput。
+		// ----------------------------------------------------------------------
+		e.injectBackgroundNotifications(&contextHistory, turnCount)
 
 		// 获取当前挂载的所有工具定义
 		availableTools := e.registry.GetAvailableTools()
@@ -105,6 +122,58 @@ func (e *AgentEngine) Run(ctx context.Context, userPrompt string) error {
 	}
 
 	return nil
+}
+
+// injectBackgroundNotifications 检查被追踪的后台任务,将已完成/异常退出的进程
+// 作为系统通知注入到对话上下文中。这样模型无需主动调用 TaskOutput 也能获知
+// 后台进程的状态变更 —— 类比操作系统中的异步信号机制。
+func (e *AgentEngine) injectBackgroundNotifications(contextHistory *[]schema.Message, turnCount int) {
+	if turnCount <= 1 {
+		return // 第一轮不需要通知
+	}
+
+	e.trackedTaskIDsMu.Lock()
+	defer e.trackedTaskIDsMu.Unlock()
+
+	if len(e.trackedTaskIDs) == 0 {
+		return
+	}
+
+	var notices []string
+
+	for taskID := range e.trackedTaskIDs {
+		snapshot, ok := e.taskManager.Get(taskID)
+		if !ok {
+			// 任务已被清理 (不应该发生,但防御性处理)
+			delete(e.trackedTaskIDs, taskID)
+			continue
+		}
+
+		if snapshot.Done {
+			notice := fmt.Sprintf(
+				"[后台进程通知] 任务 %s (%s) 已结束: status=%s exit=%d。如需要可查看 TaskOutput 获取完整日志。",
+				taskID, snapshot.Command, snapshot.Status.String(), snapshot.ExitCode,
+			)
+			notices = append(notices, notice)
+			delete(e.trackedTaskIDs, taskID) // 已通知,不再追踪
+			log.Printf("[Engine] 异步通知: 后台任务 %s 已退出 (status=%s)\n", taskID, snapshot.Status.String())
+		}
+	}
+
+	if len(notices) == 0 {
+		return
+	}
+
+	// 将通知作为 System Message 注入上下文
+	// 每条通知单独一条消息,更清晰
+	for _, notice := range notices {
+		*contextHistory = append(*contextHistory, schema.Message{
+			Role:    schema.RoleUser, // 使用 User Role 让模型感知这是"外部事件"
+			Content: notice,
+		})
+	}
+
+	log.Printf("[Engine] 注入了 %d 条后台任务通知到对话上下文\n", len(notices))
 }
 
 // streamGenerate 发起流式推理，边接收边打印，最终返回组装好的 schema.Message。
@@ -214,6 +283,8 @@ func (e *AgentEngine) consumeStream(ctx context.Context, ch <-chan provider.Stre
 //     这条 happens-before 链完整。
 //     (c) 结论：无论 goroutine 调度顺序如何，最终 contextHistory 中 Observation
 //     的追加顺序始终等于模型输出 ToolCalls 的原始顺序。
+//  4. 后台任务感知：引擎在执行 Bash 工具时,通过对比执行前后的 TaskManager 状态
+//     自动发现新启动的后台进程,加入追踪集合用于后续异步通知。
 func (e *AgentEngine) executeToolsInParallel(ctx context.Context, toolCalls []schema.ToolCall, contextHistory *[]schema.Message) {
 	n := len(toolCalls)
 
@@ -223,6 +294,9 @@ func (e *AgentEngine) executeToolsInParallel(ctx context.Context, toolCalls []sc
 		result schema.ToolResult
 	}
 	slots := make([]slot, n)
+
+	// 【后台任务追踪】记录执行前已知的所有 Task ID
+	knownTasksBefore := e.snapshotTaskIDs()
 
 	var wg sync.WaitGroup
 	wg.Add(n)
@@ -260,4 +334,26 @@ func (e *AgentEngine) executeToolsInParallel(ctx context.Context, toolCalls []sc
 		}
 		*contextHistory = append(*contextHistory, observationMsg)
 	}
+
+	// 【后台任务追踪】对比执行前后的 TaskManager 快照,发现本轮新启动的后台进程
+	knownTasksAfter := e.snapshotTaskIDs()
+	e.trackedTaskIDsMu.Lock()
+	for id := range knownTasksAfter {
+		if !knownTasksBefore[id] {
+			e.trackedTaskIDs[id] = struct{}{}
+			log.Printf("[Engine] 发现新后台任务: %s, 已加入追踪集合\n", id)
+		}
+	}
+	e.trackedTaskIDsMu.Unlock()
+}
+
+// snapshotTaskIDs 获取当前 TaskManager 中所有任务 ID 的快照集合。
+// 用于在工具执行前后做 diff,自动发现新启动的后台进程。
+func (e *AgentEngine) snapshotTaskIDs() map[string]bool {
+	tasks := e.taskManager.List()
+	set := make(map[string]bool, len(tasks))
+	for _, t := range tasks {
+		set[t.ID] = true
+	}
+	return set
 }

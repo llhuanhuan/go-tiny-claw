@@ -11,7 +11,11 @@ import (
 	"github.com/lhuan/go-tiny-claw/internal/schema"
 )
 
-// BashTool 实现了在底层 OS 执行任意 bash 命令的终极原语
+// BashTool 实现了在底层 OS 执行任意 bash 命令的终极原语。
+// 支持两种模式:
+//   - 同步模式 (默认): 阻塞等待,30s 超时,适用于 ls / go test 等短命令。
+//   - 后台模式 (run_in_background: true): 立即返回 Task ID,进程持续运行,
+//     适用于 npm run dev / python server.py 等守护进程。
 type BashTool struct {
 	workDir string // 工作区约束
 }
@@ -26,14 +30,22 @@ func (t *BashTool) Name() string {
 
 func (t *BashTool) Definition() schema.ToolDefinition {
 	return schema.ToolDefinition{
-		Name:        t.Name(),
-		Description: "在当前工作区执行任意的 bash 命令。支持链式命令(如 &&)。返回标准输出(stdout)和标准错误(stderr)。",
+		Name: t.Name(),
+		Description: "在当前工作区执行任意的 bash 命令。支持链式命令(如 &&)。\n\n" +
+			"【同步模式(默认)】: 阻塞等待命令执行完成,30 秒超时,适用于短命令。\n" +
+			"【后台模式(run_in_background: true)】: 立即返回 Task ID,进程在后台持续运行," +
+			"适用于 npm run dev / python server.py 等守护进程。" +
+			"后续可通过 TaskOutput 工具查看日志,TaskStop 工具终止进程。",
 		InputSchema: map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
 				"command": map[string]interface{}{
 					"type":        "string",
 					"description": "要执行的 bash 命令，例如: ls -la 或 go test ./...",
+				},
+				"run_in_background": map[string]interface{}{
+					"type":        "boolean",
+					"description": "设为 true 将命令转入后台守护运行。适用于 npm run dev、python server.py 等长期运行的服务进程。返回 Task ID 供后续 TaskOutput/TaskStop 使用。默认 false。",
 				},
 			},
 			"required": []string{"command"},
@@ -42,7 +54,8 @@ func (t *BashTool) Definition() schema.ToolDefinition {
 }
 
 type bashArgs struct {
-	Command string `json:"command"`
+	Command         string `json:"command"`
+	RunInBackground bool   `json:"run_in_background"`
 }
 
 func (t *BashTool) Execute(ctx context.Context, args json.RawMessage) (string, error) {
@@ -50,6 +63,29 @@ func (t *BashTool) Execute(ctx context.Context, args json.RawMessage) (string, e
 	if err := json.Unmarshal(args, &input); err != nil {
 		return "", fmt.Errorf("参数解析失败: %w", err)
 	}
+
+	// ====================================================================
+	// 后台模式: 借鉴 nohup 理念,cmd.Start() 立即返回,进程在后台持续运行
+	// ====================================================================
+	if input.RunInBackground {
+		taskID, err := GetTaskManager().Spawn(input.Command, t.workDir)
+		if err != nil {
+			return fmt.Sprintf("❌ 后台进程启动失败: %v", err), nil
+		}
+		return fmt.Sprintf(
+			"✅ 后台进程已启动\n"+
+				"   Task ID  : %s\n"+
+				"   命令     : %s\n"+
+				"   提示     : 使用 TaskOutput 工具查看后台输出 (参数: {\"task_id\": \"%s\"})\n"+
+				"             使用 TaskStop 工具终止进程  (参数: {\"task_id\": \"%s\"})\n"+
+				"             使用 TaskStop 工具无参调用可列出所有后台任务",
+			taskID, input.Command, taskID, taskID,
+		), nil
+	}
+
+	// ====================================================================
+	// 同步模式 (保持原有行为完全不变)
+	// ====================================================================
 
 	// 【驾驭底线 1】：Time Budgeting (时间预算与超时控制)
 	// 给予 bash 命令一个最大执行时间，防止大模型卡死进程 (比如运行了 top 或持续监听的 Web 服务)
@@ -69,7 +105,7 @@ func (t *BashTool) Execute(ctx context.Context, args json.RawMessage) (string, e
 
 	// 如果命令执行超时，返回警告信息让模型知晓
 	if timeoutCtx.Err() == context.DeadlineExceeded {
-		return outputStr + "\n[警告: 命令执行超时(30s)，已被系统强制终止。如果是启动常驻服务，请尝试将其转入后台。]", nil
+		return outputStr + "\n[警告: 命令执行超时(30s)，已被系统强制终止。如果是启动常驻服务，请尝试使用 run_in_background: true 将其转入后台。]", nil
 	}
 
 	// 【驾驭底线 3】：错误原样回传 (Self-Correction 自愈机制)

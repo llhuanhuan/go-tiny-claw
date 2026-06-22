@@ -33,18 +33,20 @@ func main() {
 	// 3. 初始化真实的 Tool Registry
 	registry := tools.NewRegistry()
 
-	// 4   挂载极简工具集
+	// 4. 挂载工具集 —— 四件套: 文件读写 + Bash + 后台进程管理
 	registry.Register(tools.NewReadFileTool(workDir))
 	registry.Register(tools.NewWriteFileTool(workDir))
 	registry.Register(tools.NewBashTool(workDir))
+	registry.Register(tools.NewTaskOutputTool()) // 查看后台进程日志
+	registry.Register(tools.NewTaskStopTool())   // 终止 / 列出后台进程
 
 	// 5. 实例化核心引擎，由于任务简单，我们关闭思考阶段 (EnableThinking = false) 以加快速度
 	eng := engine.NewAgentEngine(llmProvider, registry, workDir, false)
 
 	// 6. 下发一个必须通过真实工具才能完成的任务
-	prompt := `    请帮我执行以下操作：   
-	 1. 用 bash 查看一下我当前电脑的 Go 版本。    
-	 2. 帮我写一个简单的 helloworld.go 文件，输出 "Hello, go-tiny-claw!"。    
+	prompt := `    请帮我执行以下操作：
+	 1. 用 bash 查看一下我当前电脑的 Go 版本。
+	 2. 帮我写一个简单的 helloworld.go 文件，输出 "Hello, go-tiny-claw!"。
 	 3. 用 bash 编译并运行这个 go 文件，确认它能正常工作。    `
 	err := eng.Run(context.Background(), prompt)
 	if err != nil {
