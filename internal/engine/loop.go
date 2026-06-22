@@ -39,8 +39,11 @@ func NewAgentEngine(p provider.LLMProvider, r tools.Registry, workDir string, en
 	}
 }
 
-// Run 启动 Agent 的生命周期
-func (e *AgentEngine) Run(ctx context.Context, userPrompt string) error {
+// Run 启动 Agent 的生命周期。
+//
+// reporter 是引擎向外界汇报状态的唯一出口。传入 nil 时引擎将静默运行
+// （仅保留 log.Printf 级别的内部日志）。
+func (e *AgentEngine) Run(ctx context.Context, userPrompt string, reporter Reporter) error {
 	log.Printf("[Engine] 引擎启动，锁定工作区: %s\n", e.WorkDir)
 	log.Printf("[Engine] 慢思考模式 (Thinking Phase): %v\n", e.EnableThinking)
 
@@ -80,7 +83,13 @@ func (e *AgentEngine) Run(ctx context.Context, userPrompt string) error {
 		// ====================================================================
 		if e.EnableThinking {
 			log.Println("[Engine][Phase 1] 剥夺工具访问权，强制进入慢思考与规划阶段...")
-			fmt.Print("🧠 [内部思考]: ")
+
+			// 【触发 Reporter】: 开始慢思考
+			if reporter != nil {
+				reporter.OnThinking(ctx)
+			} else {
+				fmt.Print("🧠 [内部思考]: ")
+			}
 
 			thinkMsg, err := e.streamGenerate(ctx, contextHistory, nil, true)
 			if err != nil {
@@ -90,6 +99,10 @@ func (e *AgentEngine) Run(ctx context.Context, userPrompt string) error {
 
 			if thinkMsg != nil && thinkMsg.Content != "" {
 				contextHistory = append(contextHistory, *thinkMsg)
+				// 【触发 Reporter】: 思考阶段产出的规划文本
+				if reporter != nil {
+					reporter.OnMessage(ctx, thinkMsg.Content)
+				}
 			}
 		}
 
@@ -97,7 +110,9 @@ func (e *AgentEngine) Run(ctx context.Context, userPrompt string) error {
 		// Phase 2: 行动阶段 (Action) - 恢复工具，顺着规划执行
 		// ====================================================================
 		log.Println("[Engine][Phase 2] 恢复工具挂载，等待模型采取行动...")
-		fmt.Print("🤖 ")
+		if reporter == nil {
+			fmt.Print("🤖 ")
+		}
 
 		actionMsg, err := e.streamGenerate(ctx, contextHistory, availableTools, false)
 		if err != nil {
@@ -106,6 +121,11 @@ func (e *AgentEngine) Run(ctx context.Context, userPrompt string) error {
 		fmt.Println() // 回复结束后换行
 
 		contextHistory = append(contextHistory, *actionMsg)
+
+		// 当模型输出纯文本（未并发工具调用时包含总结/汇报），通过 Reporter 上报
+		if actionMsg.Content != "" && reporter != nil {
+			reporter.OnMessage(ctx, actionMsg.Content)
+		}
 
 		// 3. 退出条件判断
 		if len(actionMsg.ToolCalls) == 0 {
@@ -116,7 +136,7 @@ func (e *AgentEngine) Run(ctx context.Context, userPrompt string) error {
 		// 4. 并行执行工具调用 (Parallel Execution)
 		log.Printf("[Engine] 模型请求调用 %d 个工具...\n", len(actionMsg.ToolCalls))
 
-		e.executeToolsInParallel(ctx, actionMsg.ToolCalls, &contextHistory)
+		e.executeToolsInParallel(ctx, actionMsg.ToolCalls, &contextHistory, reporter)
 
 		// 循环回到开头，模型将带着新加入的 Observation 继续它的下一轮思考...
 	}
@@ -285,7 +305,7 @@ func (e *AgentEngine) consumeStream(ctx context.Context, ch <-chan provider.Stre
 //     的追加顺序始终等于模型输出 ToolCalls 的原始顺序。
 //  4. 后台任务感知：引擎在执行 Bash 工具时,通过对比执行前后的 TaskManager 状态
 //     自动发现新启动的后台进程,加入追踪集合用于后续异步通知。
-func (e *AgentEngine) executeToolsInParallel(ctx context.Context, toolCalls []schema.ToolCall, contextHistory *[]schema.Message) {
+func (e *AgentEngine) executeToolsInParallel(ctx context.Context, toolCalls []schema.ToolCall, contextHistory *[]schema.Message, reporter Reporter) {
 	n := len(toolCalls)
 
 	// 预分配结果槽位，每个 goroutine 写入自己的索引，无需互斥锁
@@ -321,8 +341,22 @@ func (e *AgentEngine) executeToolsInParallel(ctx context.Context, toolCalls []sc
 		// 串行路径：按模型声明顺序逐一执行，保证 happens-before 语义。
 		// 后续 Observation 追加顺序与执行顺序一致，模型天然可预测。
 		for i, tc := range toolCalls {
+			// 【触发 Reporter】: 报告即将执行的工具
+			if reporter != nil {
+				reporter.OnToolCall(ctx, tc.Name, string(tc.Arguments))
+			}
 			log.Printf("  -> 🛠️ [串行] 执行工具: %s, 参数: %s\n", tc.Name, string(tc.Arguments))
+
 			result := e.registry.Execute(ctx, tc)
+
+			// 【触发 Reporter】: 汇报工具执行结果（截断过长输出）
+			if reporter != nil {
+				displayOutput := result.Output
+				if len(displayOutput) > 200 {
+					displayOutput = displayOutput[:200] + "... (已截断)"
+				}
+				reporter.OnToolResult(ctx, tc.Name, displayOutput, result.IsError)
+			}
 			slots[i] = slot{call: tc, result: result}
 		}
 	} else {
@@ -349,10 +383,11 @@ func (e *AgentEngine) executeToolsInParallel(ctx context.Context, toolCalls []sc
 				select {
 				case sem <- struct{}{}:
 				case <-ctx.Done():
-					slots[idx] = slot{
-						call:   call,
-						result: schema.ToolResult{IsError: true, Output: ctx.Err().Error()},
+					errResult := schema.ToolResult{IsError: true, Output: ctx.Err().Error()}
+					if reporter != nil {
+						reporter.OnToolResult(ctx, call.Name, ctx.Err().Error(), true)
 					}
+					slots[idx] = slot{call: call, result: errResult}
 					wg.Done()
 					return
 				}
@@ -361,8 +396,23 @@ func (e *AgentEngine) executeToolsInParallel(ctx context.Context, toolCalls []sc
 					wg.Done()
 				}()
 
+				// 【触发 Reporter】: 报告即将执行的工具
+				if reporter != nil {
+					reporter.OnToolCall(ctx, call.Name, string(call.Arguments))
+				}
 				log.Printf("  -> 🛠️ [并行] 执行工具: %s, 参数: %s\n", call.Name, string(call.Arguments))
-				slots[idx] = slot{call: call, result: e.registry.Execute(ctx, call)}
+
+				result := e.registry.Execute(ctx, call)
+
+				// 【触发 Reporter】: 汇报工具执行结果（截断过长输出）
+				if reporter != nil {
+					displayOutput := result.Output
+					if len(displayOutput) > 200 {
+						displayOutput = displayOutput[:200] + "... (已截断)"
+					}
+					reporter.OnToolResult(ctx, call.Name, displayOutput, result.IsError)
+				}
+				slots[idx] = slot{call: call, result: result}
 			}(i, tc)
 		}
 
