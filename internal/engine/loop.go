@@ -298,24 +298,49 @@ func (e *AgentEngine) executeToolsInParallel(ctx context.Context, toolCalls []sc
 	// 【后台任务追踪】记录执行前已知的所有 Task ID
 	knownTasksBefore := e.snapshotTaskIDs()
 
-	var wg sync.WaitGroup
-	wg.Add(n)
-
-	for i, tc := range toolCalls {
-		go func(idx int, call schema.ToolCall) {
-			defer wg.Done()
-
-			log.Printf("  -> 🛠️ [并行] 执行工具: %s, 参数: %s\n", call.Name, string(call.Arguments))
-
-			// 通过 Registry 路由并执行底层工具
-			result := e.registry.Execute(ctx, call)
-
-			// 写入预分配的槽位（每个 goroutine 独享一个索引，无数据竞争）
-			slots[idx] = slot{call: call, result: result}
-		}(i, tc)
+	// =========================================================================
+	// 【并发策略】只读并发、涉写串行
+	//
+	// 核心洞察：ReAct 循环同一 Turn 内，模型决策已在 LLM 生成阶段"凝固"，
+	// 不存在"读取→模型决策→写入"的 TOCTOU 模式。数据竞争发生在纯 I/O 层：
+	//   - 纯读批次：所有操作无副作用，安全并发，收益最大
+	//   - 含写批次：退化为顺序执行，从根本上消除写丢失和脏读
+	//
+	// 若未来需要更细粒度控制，可为 bash 增加 read_only 参数，
+	// 允许 grep/ls 等无副作用命令参与纯读并发批次。
+	// =========================================================================
+	hasWrite := false
+	for _, tc := range toolCalls {
+		if e.isWriteTool(tc.Name) {
+			hasWrite = true
+			break
+		}
 	}
 
-	wg.Wait()
+	if hasWrite {
+		// 串行路径：按模型声明顺序逐一执行，保证 happens-before 语义。
+		// 后续 Observation 追加顺序与执行顺序一致，模型天然可预测。
+		for i, tc := range toolCalls {
+			log.Printf("  -> 🛠️ [串行] 执行工具: %s, 参数: %s\n", tc.Name, string(tc.Arguments))
+			result := e.registry.Execute(ctx, tc)
+			slots[i] = slot{call: tc, result: result}
+		}
+	} else {
+		// 并行路径：全读批次，Goroutine 并发执行。
+		// 预分配 slots + 值传递 idx → 不同内存地址，无数据竞争。
+		var wg sync.WaitGroup
+		wg.Add(n)
+
+		for i, tc := range toolCalls {
+			go func(idx int, call schema.ToolCall) {
+				defer wg.Done()
+				log.Printf("  -> 🛠️ [并行] 执行工具: %s, 参数: %s\n", call.Name, string(call.Arguments))
+				slots[idx] = slot{call: call, result: e.registry.Execute(ctx, call)}
+			}(i, tc)
+		}
+
+		wg.Wait()
+	}
 
 	// 按原始顺序（索引 0 → n-1）将 Observation 组装回上下文
 	for _, s := range slots {
@@ -345,6 +370,26 @@ func (e *AgentEngine) executeToolsInParallel(ctx context.Context, toolCalls []sc
 		}
 	}
 	e.trackedTaskIDsMu.Unlock()
+}
+
+// isWriteTool 判断工具是否具有文件系统或进程副作用。
+//
+// 保守策略：未显式标记为只读的工具，默认归入"写操作"——
+// 宁可多串行，不可错误并发导致数据竞争或写丢失。
+//
+//	read_file:   纯文件读取，无副作用
+//	TaskOutput:  读取后台任务状态，无副作用
+//	write_file:  覆盖写入文件
+//	edit_file:   内部 read→match→write，有副作用
+//	bash:        命令副作用不可静态分析，保守归入写
+//	TaskStop:    终止进程，有副作用
+func (e *AgentEngine) isWriteTool(name string) bool {
+	switch name {
+	case "read_file", "TaskOutput":
+		return false
+	default:
+		return true
+	}
 }
 
 // snapshotTaskIDs 获取当前 TaskManager 中所有任务 ID 的快照集合。
