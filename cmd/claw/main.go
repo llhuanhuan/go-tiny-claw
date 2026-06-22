@@ -6,62 +6,59 @@ import (
 	"os"
 
 	"github.com/lhuan/go-tiny-claw/internal/engine"
+	"github.com/lhuan/go-tiny-claw/internal/provider"
 	"github.com/lhuan/go-tiny-claw/internal/schema"
 )
 
-// 升级版 Mock Provider
-type mockProvider struct {
-	turn int
-}
-
-func (m *mockProvider) Generate(ctx context.Context, msgs []schema.Message, tools []schema.ToolDefinition) (*schema.Message, error) {
-	// 如果工具列表为空，说明这是引擎发起的 Phase 1: Thinking 阶段
-	if len(tools) == 0 {
-		return &schema.Message{
-			Role:    schema.RoleAssistant,
-			Content: "【推理中】目标是检查文件。我不能直接盲猜，我需要先调用 bash 工具执行 ls 命令，看看当前目录下有什么，然后再做定夺。",
-		}, nil
-	}
-	// 如果工具列表不为空，说明这是 Phase 2: Action 阶段
-	m.turn++
-	if m.turn == 1 {
-		// 第一轮 Action：顺着刚才的 Thinking，精准调用工具
-		return &schema.Message{
-			Role:    schema.RoleAssistant,
-			Content: "我要执行我刚才计划的步骤了。",
-			ToolCalls: []schema.ToolCall{
-				{ID: "call_123", Name: "bash", Arguments: []byte(`{"command": "ls -la"}`)},
-			},
-		}, nil
-	}
-	// 第二轮 Action：直接总结退出
-	return &schema.Message{
-		Role:    schema.RoleAssistant,
-		Content: "根据工具返回的结果，我看到了 main.go，任务圆满完成！",
-	}, nil
-}
-
+// 伪造的工具注册表 (用于测试 Provider 的工具提取能力)
 type mockRegistry struct{}
 
 func (m *mockRegistry) GetAvailableTools() []schema.ToolDefinition {
-	// 为了让 Phase 2 能检测到工具，这里返回一个伪造的工具定义数组
-	return []schema.ToolDefinition{{Name: "bash"}}
+	return []schema.ToolDefinition{
+		{
+			Name:        "get_weather",
+			Description: "获取指定城市的当前天气情况。",
+			InputSchema: map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"city": map[string]interface{}{
+						"type": "string",
+					},
+				},
+				"required": []string{"city"},
+			},
+		},
+	}
 }
 func (m *mockRegistry) Execute(ctx context.Context, call schema.ToolCall) schema.ToolResult {
+	log.Printf("  -> [Mock 工具执行] 获取 %s 的天气中...\n", call.Name)
 	return schema.ToolResult{
 		ToolCallID: call.ID,
-		Output:     "-rw-r--r--  1 user group  234 Oct 24 10:00 main.go\n",
+		Output:     "API 返回：今天是晴天，气温 25 度。",
 		IsError:    false,
 	}
 }
 func main() {
+	// 确保已设置 DEEPSEEK_API_KEY
+	if os.Getenv("DEEPSEEK_API_KEY") == "" {
+		log.Fatal("请先设置 DEEPSEEK_API_KEY 环境变量")
+	}
+
+	// 设置：set DEEPSEEK_API_KEY=sk-3xxxxxxxxxxx
+	// 验证:echo $env:DEEPSEEK_API_KEY
 	workDir, _ := os.Getwd()
-	p := &mockProvider{}
-	r := &mockRegistry{}
-	// 实例化引擎，开启 EnableThinking = true
-	eng := engine.NewAgentEngine(p, r, workDir, true)
-	err := eng.Run(context.Background(), "帮我检查当前目录的文件")
+	// 1. 初始化真实的 Provider 大脑 (指向 DeepSeek)
+	// 这里你可以任意切换 NewDeepSeekClaudeProvider 或 NewDeepSeekOpenAIProvider，效果完全一致！
+	// llmProvider := provider.NewDeepSeekClaudeProvider("deepseek-v4-pro")
+	llmProvider := provider.NewDeepSeekOpenAIProvider("deepseek-v4-pro")
+	// 2. 注入伪造的工具注册表
+	registry := &mockRegistry{}
+	// 3. 实例化并运行引擎，开启 EnableThinking = true (开启慢思考阶段！)
+	eng := engine.NewAgentEngine(llmProvider, registry, workDir, false)
+	// 设定测试任务
+	prompt := "我想去北京跑步，帮我查查天气适合吗？"
+	err := eng.Run(context.Background(), prompt)
 	if err != nil {
-		log.Fatalf("引擎崩溃: %v", err)
+		log.Fatalf("引擎运行崩溃: %v", err)
 	}
 }
