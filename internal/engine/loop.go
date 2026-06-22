@@ -328,12 +328,39 @@ func (e *AgentEngine) executeToolsInParallel(ctx context.Context, toolCalls []sc
 	} else {
 		// 并行路径：全读批次，Goroutine 并发执行。
 		// 预分配 slots + 值传递 idx → 不同内存地址，无数据竞争。
+		//
+		// 【并发上限控制】使用 Buffered Channel 作为计数信号量 (Counting Semaphore):
+		//   - sem <- struct{}{} 获取令牌（满则阻塞排队）
+		//   - <-sem 归还令牌（唤醒下一个等待者）
+		// WaitGroup 只管"是否全部完成"，Semaphore 只管"同时最多几个在跑"——
+		// 两个原语正交组合，零侵入。
+		//
+		// 为什么需要上限？本地 read_file 瞬间读5个不成问题，但如果挂载了
+		// fetch_web_url / query_jira_api 等网络工具，一次性50个并发请求
+		// 会触发目标站防火墙或 API Rate Limit 封杀。
+		const maxConcurrent = 5
+		sem := make(chan struct{}, maxConcurrent)
 		var wg sync.WaitGroup
 		wg.Add(n)
 
 		for i, tc := range toolCalls {
 			go func(idx int, call schema.ToolCall) {
-				defer wg.Done()
+				// 获取并发令牌，同时尊重 ctx 取消信号
+				select {
+				case sem <- struct{}{}:
+				case <-ctx.Done():
+					slots[idx] = slot{
+						call:   call,
+						result: schema.ToolResult{IsError: true, Output: ctx.Err().Error()},
+					}
+					wg.Done()
+					return
+				}
+				defer func() {
+					<-sem // 归还令牌
+					wg.Done()
+				}()
+
 				log.Printf("  -> 🛠️ [并行] 执行工具: %s, 参数: %s\n", call.Name, string(call.Arguments))
 				slots[idx] = slot{call: call, result: e.registry.Execute(ctx, call)}
 			}(i, tc)
@@ -371,18 +398,6 @@ func (e *AgentEngine) executeToolsInParallel(ctx context.Context, toolCalls []sc
 	}
 	e.trackedTaskIDsMu.Unlock()
 }
-
-// isWriteTool 判断工具是否具有文件系统或进程副作用。
-//
-// 保守策略：未显式标记为只读的工具，默认归入"写操作"——
-// 宁可多串行，不可错误并发导致数据竞争或写丢失。
-//
-//	read_file:   纯文件读取，无副作用
-//	TaskOutput:  读取后台任务状态，无副作用
-//	write_file:  覆盖写入文件
-//	edit_file:   内部 read→match→write，有副作用
-//	bash:        命令副作用不可静态分析，保守归入写
-//	TaskStop:    终止进程，有副作用
 func (e *AgentEngine) isWriteTool(name string) bool {
 	switch name {
 	case "read_file", "TaskOutput":
