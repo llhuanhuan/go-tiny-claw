@@ -7,37 +7,12 @@ import (
 
 	"github.com/lhuan/go-tiny-claw/internal/engine"
 	"github.com/lhuan/go-tiny-claw/internal/provider"
-	"github.com/lhuan/go-tiny-claw/internal/schema"
+	"github.com/lhuan/go-tiny-claw/internal/tools"
 )
 
 // 伪造的工具注册表 (用于测试 Provider 的工具提取能力)
 type mockRegistry struct{}
 
-func (m *mockRegistry) GetAvailableTools() []schema.ToolDefinition {
-	return []schema.ToolDefinition{
-		{
-			Name:        "get_weather",
-			Description: "获取指定城市的当前天气情况。",
-			InputSchema: map[string]interface{}{
-				"type": "object",
-				"properties": map[string]interface{}{
-					"city": map[string]interface{}{
-						"type": "string",
-					},
-				},
-				"required": []string{"city"},
-			},
-		},
-	}
-}
-func (m *mockRegistry) Execute(ctx context.Context, call schema.ToolCall) schema.ToolResult {
-	log.Printf("  -> [Mock 工具执行] 获取 %s 的天气中...\n", call.Name)
-	return schema.ToolResult{
-		ToolCallID: call.ID,
-		Output:     "API 返回：今天是晴天，气温 25 度。",
-		IsError:    false,
-	}
-}
 func main() {
 	// 确保已设置 DEEPSEEK_API_KEY
 	if os.Getenv("DEEPSEEK_API_KEY") == "" {
@@ -46,17 +21,25 @@ func main() {
 
 	// 设置：set DEEPSEEK_API_KEY=sk-3xxxxxxxxxxx
 	// 验证:echo $env:DEEPSEEK_API_KEY
+
+	// 1. 获取工作区物理边界
 	workDir, _ := os.Getwd()
-	// 1. 初始化真实的 Provider 大脑 (指向 DeepSeek)
+
+	// 2. 初始化真实的 Provider 大脑 (指向 DeepSeek)
 	// 这里你可以任意切换 NewDeepSeekClaudeProvider 或 NewDeepSeekOpenAIProvider，效果完全一致！
 	// llmProvider := provider.NewDeepSeekClaudeProvider("deepseek-v4-pro")
 	llmProvider := provider.NewDeepSeekOpenAIProvider("deepseek-v4-pro")
-	// 2. 注入伪造的工具注册表
-	registry := &mockRegistry{}
-	// 3. 实例化并运行引擎，开启 EnableThinking = true (开启慢思考阶段！)
+
+	// 3. 初始化真实的 Tool Registry
+	registry := tools.NewRegistry()
+	// 4. 将真实的 ReadFile 工具挂载到注册表中
+	readFileTool := tools.NewReadFileTool(workDir)
+	registry.Register(readFileTool)
+	// 5. 实例化核心引擎，由于任务简单，我们关闭思考阶段 (EnableThinking = false) 以加快速度
 	eng := engine.NewAgentEngine(llmProvider, registry, workDir, false)
-	// 设定测试任务
-	prompt := "我想去北京跑步，帮我查查天气适合吗？"
+
+	// 6. 下发一个必须通过真实工具才能完成的任务
+	prompt := "请调用工具读取一下当前工作区目录下 hello.txt 文件的内容，并用一句话向我总结它说了什么。"
 	err := eng.Run(context.Background(), prompt)
 	if err != nil {
 		log.Fatalf("引擎运行崩溃: %v", err)
