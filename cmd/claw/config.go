@@ -37,7 +37,7 @@ func (c *ServerConfig) Validate() error {
 	// 模式白名单校验
 	switch c.Mode {
 	case "debug":
-		log.Println("[Config] ★ 当前运行在 Debug 模式 —— 星宿老仙，法力无边！")
+		log.Println("[Config] ★ 当前运行在 Debug 模式 —— 千秋万载，一统江湖！")
 	case "release":
 		log.Println("[Config] 运行在 Release 模式")
 	default:
