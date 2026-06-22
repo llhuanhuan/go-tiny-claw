@@ -63,14 +63,16 @@ func (e *AgentEngine) Run(ctx context.Context, userPrompt string) error {
 		// ====================================================================
 		if e.EnableThinking {
 			log.Println("[Engine][Phase 1] 剥夺工具访问权，强制进入慢思考与规划阶段...")
+			fmt.Print("🧠 [内部思考]: ")
 
-			thinkResp, err := e.provider.Generate(ctx, contextHistory, nil)
+			thinkMsg, err := e.streamGenerate(ctx, contextHistory, nil, true)
 			if err != nil {
 				return fmt.Errorf("Thinking 阶段生成失败: %w", err)
 			}
-			if thinkResp != nil && thinkResp.Content != "" {
-				fmt.Printf("🧠 [内部思考 Trace]: %s\n", thinkResp.Content)
-				contextHistory = append(contextHistory, *thinkResp)
+			fmt.Println() // 思考结束后换行
+
+			if thinkMsg != nil && thinkMsg.Content != "" {
+				contextHistory = append(contextHistory, *thinkMsg)
 			}
 		}
 
@@ -78,33 +80,124 @@ func (e *AgentEngine) Run(ctx context.Context, userPrompt string) error {
 		// Phase 2: 行动阶段 (Action) - 恢复工具，顺着规划执行
 		// ====================================================================
 		log.Println("[Engine][Phase 2] 恢复工具挂载，等待模型采取行动...")
+		fmt.Print("🤖 ")
 
-		actionResp, err := e.provider.Generate(ctx, contextHistory, availableTools)
+		actionMsg, err := e.streamGenerate(ctx, contextHistory, availableTools, false)
 		if err != nil {
 			return fmt.Errorf("Action 阶段生成失败: %w", err)
 		}
+		fmt.Println() // 回复结束后换行
 
-		contextHistory = append(contextHistory, *actionResp)
-
-		if actionResp.Content != "" {
-			fmt.Printf("🤖 [对外回复]: %s\n", actionResp.Content)
-		}
+		contextHistory = append(contextHistory, *actionMsg)
 
 		// 3. 退出条件判断
-		if len(actionResp.ToolCalls) == 0 {
+		if len(actionMsg.ToolCalls) == 0 {
 			log.Println("[Engine] 模型未请求调用工具，任务宣告完成。")
 			break
 		}
 
 		// 4. 并行执行工具调用 (Parallel Execution)
-		log.Printf("[Engine] 模型请求调用 %d 个工具...\n", len(actionResp.ToolCalls))
+		log.Printf("[Engine] 模型请求调用 %d 个工具...\n", len(actionMsg.ToolCalls))
 
-		e.executeToolsInParallel(ctx, actionResp.ToolCalls, &contextHistory)
+		e.executeToolsInParallel(ctx, actionMsg.ToolCalls, &contextHistory)
 
 		// 循环回到开头，模型将带着新加入的 Observation 继续它的下一轮思考...
 	}
 
 	return nil
+}
+
+// streamGenerate 发起流式推理，边接收边打印，最终返回组装好的 schema.Message。
+//
+// 参数 isThinking 控制提示前缀的显示方式：
+//   - true:  打印思考过程，所有文本增量直接输出
+//   - false: 打印助手回复，所有文本增量直接输出
+func (e *AgentEngine) streamGenerate(
+	ctx context.Context,
+	messages []schema.Message,
+	availableTools []schema.ToolDefinition,
+	isThinking bool,
+) (*schema.Message, error) {
+	ch, err := e.provider.StreamGenerate(ctx, messages, availableTools)
+	if err != nil {
+		return nil, fmt.Errorf("启动流式请求失败: %w", err)
+	}
+
+	return e.consumeStream(ctx, ch)
+}
+
+// consumeStream 消费 StreamEvent 通道，实现"边打印边累积"。
+//
+// 引擎侧数据流：
+//
+//	chan StreamEvent ──▶ select {
+//	                        case <-ctx.Done():  → 取消
+//	                        case ev, ok := <-ch:
+//	                          switch ev.Type {
+//	                          case ThinkingDelta:
+//	                            os.Stdout ← ev.Delta          // 实时逐字打印思考
+//	                            acc.thinking.WriteString(ev)  // 累积到思考缓冲区
+//	                          case TextDelta:
+//	                            os.Stdout ← ev.Delta          // 实时逐字打印回复
+//	                            acc.content.WriteString(ev)   // 累积到文本缓冲区
+//	                          case ToolCallBegin:
+//	                            acc.toolMap[index] = {ID, Name}  // 建立槽位
+//	                          case ToolCallArgsDelta:
+//	                            acc.toolMap[index].ArgsBuf.WriteString(ev)  // 拼接 JSON
+//	                          case Done:
+//	                            return acc.Finalize()
+//	                            // Finalize: content → msg.Content
+//	                            //           argsBuf[i] → json.RawMessage → msg.ToolCalls[i]
+//	                            //           sort by index → 保证顺序
+//	                          }
+//	                        }
+//
+// 职责：
+//  1. 实时将文本/思考增量打印到终端（用户体验）
+//  2. 将工具调用片段路由到 StreamAccumulator（结构化累积）
+//  3. 监听 ctx.Done() 支持中途取消
+//  4. 在流结束时返回组装好的 schema.Message
+func (e *AgentEngine) consumeStream(ctx context.Context, ch <-chan provider.StreamEvent) (*schema.Message, error) {
+	acc := provider.NewStreamAccumulator()
+
+	for {
+		select {
+		case <-ctx.Done():
+			// 上下文被取消（例如用户 Ctrl+C 或超时）
+			return nil, ctx.Err()
+
+		case ev, ok := <-ch:
+			if !ok {
+				// channel 被关闭但未收到 Done/Error（防御性编程）
+				log.Println("[Engine] 警告：流通道意外关闭，使用已累积的内容")
+				return acc.Finalize(), nil
+			}
+
+			switch ev.Type {
+			case provider.StreamEventError:
+				return nil, ev.Error
+
+			case provider.StreamEventDone:
+				return acc.Finalize(), nil
+
+			case provider.StreamEventThinkingDelta:
+				fmt.Print(ev.Delta) // 实时打印思考内容
+				acc.Ingest(ev)
+
+			case provider.StreamEventTextDelta:
+				fmt.Print(ev.Delta) // 实时打印回复内容
+				acc.Ingest(ev)
+
+			case provider.StreamEventToolCallBegin:
+				log.Printf("  -> 📞 [流式] 模型请求调用工具 #%d: %s (%s)\n",
+					ev.ToolCallIndex, ev.ToolCallName, ev.ToolCallID)
+				acc.Ingest(ev)
+
+			case provider.StreamEventToolCallArgsDelta:
+				acc.Ingest(ev)
+			}
+		}
+	}
 }
 
 // executeToolsInParallel 并行执行所有工具调用，并按原始顺序将 Observation 组装回 Context。
