@@ -222,23 +222,90 @@ func lineByLineReplace(content, oldText, newText string, replaceAll bool) (strin
 	}
 
 	// 执行行级替换 (从后往前替换以保持行号稳定)
+	// 每次替换前提取匹配窗口的"基准缩进"，自动补齐到 newText 每一行，
+	// 避免深层嵌套代码因模型省略缩进而格式崩塌。
 	if replaceAll {
 		for i := len(matches) - 1; i >= 0; i-- {
 			m := matches[i]
-			var newContentLines []string
-			newContentLines = append(newContentLines, contentLines[:m.startLine]...)
-			newContentLines = append(newContentLines, newText)
-			newContentLines = append(newContentLines, contentLines[m.endLine:]...)
-			contentLines = newContentLines
+			baseIndent := extractBaseIndent(contentLines[m.startLine:m.endLine])
+			anchored := reindentText(newText, baseIndent)
+			contentLines = spliceLines(contentLines, m.startLine, m.endLine, anchored)
 		}
 	} else {
 		m := matches[0]
-		var newContentLines []string
-		newContentLines = append(newContentLines, contentLines[:m.startLine]...)
-		newContentLines = append(newContentLines, newText)
-		newContentLines = append(newContentLines, contentLines[m.endLine:]...)
-		contentLines = newContentLines
+		baseIndent := extractBaseIndent(contentLines[m.startLine:m.endLine])
+		anchored := reindentText(newText, baseIndent)
+		contentLines = spliceLines(contentLines, m.startLine, m.endLine, anchored)
 	}
 
 	return strings.Join(contentLines, "\n"), 4, nil
+}
+
+// =========================================================================
+// 缩进智能锚定 —— 解决 newText 丢失基准缩进导致格式崩塌的问题
+// =========================================================================
+
+// extractBaseIndent 从匹配到的原始行中提取基准缩进前缀。
+// 取窗口内第一个非空行的前导空白作为该嵌套深度的缩进基准。
+func extractBaseIndent(lines []string) string {
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" {
+			continue
+		}
+		return line[:len(line)-len(strings.TrimLeft(line, " \t"))]
+	}
+	return ""
+}
+
+// extractMinIndent 取 newText 所有非空行中前导空白最短的那个，
+// 作为模型在 newText 内部使用的"相对缩进基线"。
+func extractMinIndent(lines []string) string {
+	var minIndent string
+	first := true
+	for _, line := range lines {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		indent := line[:len(line)-len(strings.TrimLeft(line, " \t"))]
+		if first || len(indent) < len(minIndent) {
+			minIndent = indent
+			first = false
+		}
+	}
+	return minIndent
+}
+
+// reindentText 将 newText 的缩进重新锚定到 baseIndent。
+// 剥掉 newText 自带的最小缩进（模型自己加的），换上匹配窗口的基准缩进，
+// 从而保持块内相对缩进不变、绝对缩进与上下文一致。
+func reindentText(text, baseIndent string) string {
+	lines := strings.Split(text, "\n")
+	minIndent := extractMinIndent(lines)
+
+	for i, line := range lines {
+		if strings.TrimSpace(line) == "" {
+			// 纯空行：保留为空，不填充空白前缀
+			lines[i] = ""
+			continue
+		}
+		if minIndent != "" && strings.HasPrefix(line, minIndent) {
+			lines[i] = baseIndent + line[len(minIndent):]
+		} else {
+			lines[i] = baseIndent + strings.TrimLeft(line, " \t")
+		}
+	}
+	return strings.Join(lines, "\n")
+}
+
+// spliceLines 将 lines[start:end] 替换为 newText（已拆分为行），
+// 返回新的行切片。等价于 append(prefix, newText行..., suffix...)
+func spliceLines(lines []string, start, end int, newText string) []string {
+	var result []string
+	result = append(result, lines[:start]...)
+	if newText != "" {
+		result = append(result, strings.Split(newText, "\n")...)
+	}
+	result = append(result, lines[end:]...)
+	return result
 }
