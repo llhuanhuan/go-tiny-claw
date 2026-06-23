@@ -30,13 +30,22 @@ func main() {
 	registry.Register(tools.NewTaskStopTool())
 
 	// 3. 实例化引擎
-	enableThinking := os.Getenv("ENABLE_THINKING") == "true"
-	eng := engine.NewAgentEngine(llmProvider, registry, workDir, enableThinking)
+	// enableThinking := os.Getenv("ENABLE_THINKING") == "true"
+	eng := engine.NewAgentEngine(llmProvider, registry, workDir, true)
 
 	// 4. 检测运行模式
 	hasFeishu := os.Getenv("FEISHU_APP_ID") != ""
 	hasWechat := os.Getenv("WECHAT_WEBHOOK_URL") != ""
 
+	// 【注入新实现的终端输出器】
+	// reporter := engine.NewTerminalReporter()
+
+	// TODO: 以下为调试用 PromptComposer 端到端测试代码，生产环境请注释
+	// prompt := `    我需要在当前目录下新建一个 ping.go，提供一个简单的 http ping 接口。    写完之后，帮我把代码用 git 提交一下。    `
+	// err := eng.Run(context.Background(), prompt, reporter)
+	// if err != nil {
+	// 	log.Fatalf("引擎运行崩溃: %v", err)
+	// }
 	switch {
 	case hasFeishu:
 		// ================================================================

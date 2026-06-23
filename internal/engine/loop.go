@@ -6,6 +6,8 @@ import (
 	"log"
 	"sync"
 
+	ctxpkg "github.com/lhuan/go-tiny-claw/internal/context"
+
 	"github.com/lhuan/go-tiny-claw/internal/provider"
 	"github.com/lhuan/go-tiny-claw/internal/schema"
 	"github.com/lhuan/go-tiny-claw/internal/tools"
@@ -23,9 +25,9 @@ type AgentEngine struct {
 
 	// 后台任务追踪: 引擎自动感知本轮启动的后台进程,并在后续 Turn 中
 	// 当进程退出时主动通知模型 (异步事件注入),无需模型手动轮询 TaskOutput。
-	taskManager       *tools.TaskManager
-	trackedTaskIDs    map[string]struct{} // 本轮启动的 Task ID 集合
-	trackedTaskIDsMu  sync.Mutex
+	taskManager      *tools.TaskManager
+	trackedTaskIDs   map[string]struct{} // 本轮启动的 Task ID 集合
+	trackedTaskIDsMu sync.Mutex
 
 	// wsRWMu 是工作区读写锁 (Workspace RWMutex)，保护 WorkDir 文件系统在多个
 	// 并发 Run() 调用之间的一致性：
@@ -35,6 +37,8 @@ type AgentEngine struct {
 	// 锁粒度控制在工具批次级而非整个 Run() 生命周期，避免 Agent 在纯 LLM 推理
 	// 阶段白白阻塞其他 Agent 的读操作。
 	wsRWMu sync.RWMutex
+
+	composer *ctxpkg.PromptComposer // 【新增】引擎持有 Composer 实例
 }
 
 func NewAgentEngine(p provider.LLMProvider, r tools.Registry, workDir string, enableThinking bool) *AgentEngine {
@@ -45,6 +49,7 @@ func NewAgentEngine(p provider.LLMProvider, r tools.Registry, workDir string, en
 		EnableThinking: enableThinking,
 		taskManager:    tools.GetTaskManager(),
 		trackedTaskIDs: make(map[string]struct{}),
+		composer:       ctxpkg.NewPromptComposer(workDir),
 	}
 }
 
@@ -56,11 +61,15 @@ func (e *AgentEngine) Run(ctx context.Context, userPrompt string, reporter Repor
 	log.Printf("[Engine] 引擎启动，锁定工作区: %s\n", e.WorkDir)
 	log.Printf("[Engine] 慢思考模式 (Thinking Phase): %v\n", e.EnableThinking)
 
+	// 【核心修改】动态组装 System Prompt，彻底替换掉以前硬编码的面条提示词！
+	systemMsg := e.composer.Build()
+
 	// 确保引擎退出时清理所有后台进程
 	defer e.taskManager.Shutdown()
 
 	// 1. 初始化会话的 Context (上下文内存)
 	contextHistory := []schema.Message{
+		systemMsg, // 注入动态组装的内核、AGENTS.md 与 Skills
 		{
 			Role:    schema.RoleSystem,
 			Content: "You are go-tiny-claw, an expert coding assistant. You have full access to tools in the workspace.",
