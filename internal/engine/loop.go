@@ -26,6 +26,15 @@ type AgentEngine struct {
 	taskManager       *tools.TaskManager
 	trackedTaskIDs    map[string]struct{} // 本轮启动的 Task ID 集合
 	trackedTaskIDsMu  sync.Mutex
+
+	// wsRWMu 是工作区读写锁 (Workspace RWMutex)，保护 WorkDir 文件系统在多个
+	// 并发 Run() 调用之间的一致性：
+	//   - 纯读批次 (read_file, TaskOutput): 持有 RLock，多个 Run() 可并发读
+	//   - 含写批次 (bash, write_file, edit_file, TaskStop): 持有 Lock，独占工作区
+	//
+	// 锁粒度控制在工具批次级而非整个 Run() 生命周期，避免 Agent 在纯 LLM 推理
+	// 阶段白白阻塞其他 Agent 的读操作。
+	wsRWMu sync.RWMutex
 }
 
 func NewAgentEngine(p provider.LLMProvider, r tools.Registry, workDir string, enableThinking bool) *AgentEngine {
@@ -340,6 +349,13 @@ func (e *AgentEngine) executeToolsInParallel(ctx context.Context, toolCalls []sc
 	if hasWrite {
 		// 串行路径：按模型声明顺序逐一执行，保证 happens-before 语义。
 		// 后续 Observation 追加顺序与执行顺序一致，模型天然可预测。
+
+		// 【工作区写锁】跨 Run() 互斥：同一时刻只有一个 Agent 能修改文件。
+		// 锁范围覆盖整个写批次 (batch)，确保同一 Run() 内的多个写工具
+		// 原子执行完毕前，其他 Run() 的读/写操作均被阻塞。
+		e.wsRWMu.Lock()
+		defer e.wsRWMu.Unlock()
+
 		for i, tc := range toolCalls {
 			// 【触发 Reporter】: 报告即将执行的工具
 			if reporter != nil {
@@ -402,7 +418,10 @@ func (e *AgentEngine) executeToolsInParallel(ctx context.Context, toolCalls []sc
 				}
 				log.Printf("  -> 🛠️ [并行] 执行工具: %s, 参数: %s\n", call.Name, string(call.Arguments))
 
+				// 【工作区读锁】与写者互斥，多个读者之间可并发
+				e.wsRWMu.RLock()
 				result := e.registry.Execute(ctx, call)
+				e.wsRWMu.RUnlock()
 
 				// 【触发 Reporter】: 汇报工具执行结果（截断过长输出）
 				if reporter != nil {
