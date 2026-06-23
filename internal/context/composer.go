@@ -1,6 +1,7 @@
 package context
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -21,12 +22,24 @@ func NewPromptComposer(workDir string) *PromptComposer {
 	}
 }
 
-// Build 组装并返回一条完整的 RoleSystem 消息
+// SkillLoader 返回内部的 SkillLoader 引用，供外部注册 read_skill 工具使用。
+func (c *PromptComposer) SkillLoader() *SkillLoader {
+	return c.skillLoader
+}
+
+// Build 组装并返回一条完整的 RoleSystem 消息。
+//
+// 三段式结构：
+//  1. 极简内核 (Minimal Core) —— 身份与红线纪律
+//  2. 外部化状态 (AGENTS.md) —— 项目专属规范
+//  3. 技能元数据索引 (Skills Metadata) —— 渐进式暴露，通过 read_skill 按需加载正文
 func (c *PromptComposer) Build() schema.Message {
 	var promptBuilder strings.Builder
 
+	// ═══════════════════════════════════════════════════════════════
 	// 1. 极简内核 (Minimal Core)
-	// 仅确立基本身份与最底线的红线纪律
+	//    仅确立基本身份与最底线的红线纪律
+	// ═══════════════════════════════════════════════════════════════
 	promptBuilder.WriteString(`# 核心身份
 你名叫 go-tiny-claw，一个由驾驭工程驱动的骨灰级研发助手。
 你具备极简主义哲学，拒绝废话。你能通过系统提供的内置工具，创建、读取、修改和执行工作区中的代码。
@@ -40,7 +53,10 @@ func (c *PromptComposer) Build() schema.Message {
 6. 始终用中文回复，以便传达你的进展和想法。
 `)
 
+	// ═══════════════════════════════════════════════════════════════
 	// 2. 外部化状态：加载项目专属规范 (AGENTS.md)
+	//    借鉴 OpenClaw 哲学，将易变的业务规范剥离出核心引擎。
+	// ═══════════════════════════════════════════════════════════════
 	agentsMDPath := filepath.Join(c.workDir, "AGENTS.md")
 	content, err := os.ReadFile(agentsMDPath)
 	if err == nil {
@@ -51,10 +67,26 @@ func (c *PromptComposer) Build() schema.Message {
 		promptBuilder.WriteString("\n```\n")
 	}
 
-	// 3. 动态加载技能外挂 (Skills)
-	skillsContent := c.skillLoader.LoadAll()
-	if skillsContent != "" {
-		promptBuilder.WriteString(skillsContent)
+	// ═══════════════════════════════════════════════════════════════
+	// 3. 技能元数据索引 (Progressive Disclosure)
+	//
+	//    设计原则：
+	//    - 仅注入技能的 YAML 元数据（名称 + 触发描述），正文不进入 System Prompt
+	//    - 模型根据触发描述判断是否启用，通过 read_skill 工具按需拉取正文
+	//    - 即使 50 个技能包，元数据索引也仅消耗百级 Token，避免 Eager Loading
+	//      "开局吃掉几万 Token" 的痛点
+	// ═══════════════════════════════════════════════════════════════
+	skills := c.skillLoader.LoadAllMetadata()
+	if len(skills) > 0 {
+		promptBuilder.WriteString("\n### 可用专业技能 (Agent Skills)\n")
+		promptBuilder.WriteString("以下技能已安装于当前工作区。每个技能的**完整指令正文**不会在此列出——\n")
+		promptBuilder.WriteString("当你判断当前任务匹配某个技能的触发条件时，必须主动调用 `read_skill` 工具\n")
+		promptBuilder.WriteString("（参数为技能名称）来获取其详细执行指南。\n\n")
+		promptBuilder.WriteString("**切勿假设你已知道某项技能的正文内容——你必须通过 read_skill 工具主动拉取！**\n\n")
+
+		for _, skill := range skills {
+			promptBuilder.WriteString(fmt.Sprintf("- **%s**: %s\n", skill.Name, skill.Description))
+		}
 	}
 
 	return schema.Message{

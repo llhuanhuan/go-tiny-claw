@@ -53,6 +53,12 @@ func NewAgentEngine(p provider.LLMProvider, r tools.Registry, workDir string, en
 	}
 }
 
+// SkillLoader 返回引擎内部 Composer 持有的 SkillLoader 引用，
+// 供外部注册 read_skill 工具使用（渐进式暴露架构）。
+func (e *AgentEngine) SkillLoader() *ctxpkg.SkillLoader {
+	return e.composer.SkillLoader()
+}
+
 // Run 启动 Agent 的生命周期。
 //
 // reporter 是引擎向外界汇报状态的唯一出口。传入 nil 时引擎将静默运行

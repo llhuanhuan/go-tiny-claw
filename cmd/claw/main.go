@@ -33,6 +33,13 @@ func main() {
 	// enableThinking := os.Getenv("ENABLE_THINKING") == "true"
 	eng := engine.NewAgentEngine(llmProvider, registry, workDir, true)
 
+	// 3.5 注册渐进式暴露技能工具 (read_skill)
+	// 引擎内部已持有 PromptComposer → SkillLoader 引用链，
+	// 此处取出 SkillLoader 注入 ReadSkillTool，实现"元数据在 System Prompt、
+	// 正文按需加载"的渐进式暴露架构。
+	skillLoader := eng.SkillLoader()
+	registry.Register(tools.NewReadSkillTool(skillLoader))
+
 	// 4. 检测运行模式
 	hasFeishu := os.Getenv("FEISHU_APP_ID") != ""
 	hasWechat := os.Getenv("WECHAT_WEBHOOK_URL") != ""
