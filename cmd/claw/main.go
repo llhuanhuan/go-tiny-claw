@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log"
 	"net/http"
 	"os"
@@ -19,6 +20,12 @@ import (
 func main() {
 	workDir, _ := os.Getwd()
 
+	// 0. 加载配置（config.yaml + 环境变量覆盖）
+	cfg, err := LoadConfig("config.yaml")
+	if err != nil {
+		log.Fatalf("加载配置失败: %v", err)
+	}
+
 	// 1. 初始化 LLM Provider
 	llmProvider := detectProvider()
 
@@ -32,46 +39,21 @@ func main() {
 	registry.Register(tools.NewTaskStopTool())
 
 	// 3. 实例化引擎
-	// enableThinking := os.Getenv("ENABLE_THINKING") == "true"
 	eng := engine.NewAgentEngine(llmProvider, registry, workDir, true)
 
 	// 3.5 注册渐进式暴露技能工具 (read_skill)
-	// 引擎内部已持有 PromptComposer → SkillLoader 引用链，
-	// 此处取出 SkillLoader 注入 ReadSkillTool，实现"元数据在 System Prompt、
-	// 正文按需加载"的渐进式暴露架构。
 	skillLoader := eng.SkillLoader()
 	registry.Register(tools.NewReadSkillTool(skillLoader))
 
-	// 4. 检测运行模式
-	hasFeishu := os.Getenv("FEISHU_APP_ID") != ""
-	hasWechat := os.Getenv("WECHAT_WEBHOOK_URL") != ""
-
-	// 【注入新实现的终端输出器】
-	// reporter := engine.NewTerminalReporter()
-
-	// TODO: 以下为调试用 PromptComposer 端到端测试代码，生产环境请注释
-	// prompt := `    我需要在当前目录下新建一个 ping.go，提供一个简单的 http ping 接口。    写完之后，帮我把代码用 git 提交一下。    `
-	// err := eng.Run(context.Background(), prompt, reporter)
-	// if err != nil {
-	// 	log.Fatalf("引擎运行崩溃: %v", err)
-	// }
+	// 4. 检测运行模式（优先飞书 > 微信 > 终端）
 	switch {
-	case hasFeishu:
-		// ================================================================
-		// 飞书模式：WebSocket 长连接（无需公网 IP/域名）
-		// ================================================================
-		runFeishu(eng)
+	case cfg.Feishu.AppID != "":
+		runFeishu(eng, cfg)
 
-	case hasWechat:
-		// ================================================================
-		// 微信模式：HTTP Webhook 回调
-		// ================================================================
-		runWechat(eng)
+	case cfg.Wechat.WebhookURL != "":
+		runWechat(eng, cfg)
 
 	default:
-		// ================================================================
-		// 终端模式：交互式 CLI
-		// ================================================================
 		runTerminal(eng)
 	}
 }
@@ -123,8 +105,8 @@ func loadClaudeCodeEnv() {
 }
 
 // runFeishu 通过 WebSocket 长连接接入飞书。
-func runFeishu(eng *engine.AgentEngine) {
-	bot := feishu.NewFeishuBot(eng)
+func runFeishu(eng *engine.AgentEngine, cfg *AppConfig) {
+	bot := feishu.NewFeishuBot(eng, cfg.Feishu.AppID, cfg.Feishu.AppSecret)
 
 	// 监听 Ctrl+C 优雅退出
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
@@ -138,8 +120,12 @@ func runFeishu(eng *engine.AgentEngine) {
 }
 
 // runWechat 通过 HTTP Webhook 接入企业微信。
-func runWechat(eng *engine.AgentEngine) {
-	bot := wechat.NewWeChatBot(eng)
+func runWechat(eng *engine.AgentEngine, cfg *AppConfig) {
+	bot := wechat.NewWeChatBot(eng, wechat.WechatBotConfig{
+		WebhookURL:     cfg.Wechat.WebhookURL,
+		Token:          cfg.Wechat.Token,
+		EncodingAESKey: cfg.Wechat.EncodingAESKey,
+	})
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/webhook/wechat", bot.ServeHTTP)
@@ -148,12 +134,7 @@ func runWechat(eng *engine.AgentEngine) {
 		w.Write([]byte("ok"))
 	})
 
-	port := os.Getenv("PORT")
-	if port == "" {
-		port = ":48080"
-	} else if port[0] != ':' {
-		port = ":" + port
-	}
+	port := fmt.Sprintf(":%d", cfg.Server.Port)
 
 	log.Printf("🚀 go-tiny-claw 微信服务端已启动，监听 %s/webhook/wechat\n", port)
 	if err := http.ListenAndServe(port, mux); err != nil {

@@ -18,7 +18,6 @@ import (
 	"io"
 	"log"
 	"net/http"
-	"os"
 	"sort"
 	"strings"
 
@@ -37,25 +36,24 @@ type WeChatBot struct {
 	engine     *engine.AgentEngine // 持有核心引擎引用
 }
 
-// NewWeChatBot 创建一个企业微信 Bot 实例。
-//
-// 必需环境变量：
-//   - WECHAT_WEBHOOK_URL：群机器人的 Webhook 地址（用于发送消息）
-//
-// 可选环境变量（回调验证用）：
-//   - WECHAT_TOKEN：回调签名校验 Token
-//   - WECHAT_ENCODING_AES_KEY：消息加解密密钥
-func NewWeChatBot(eng *engine.AgentEngine) *WeChatBot {
-	webhookURL := os.Getenv("WECHAT_WEBHOOK_URL")
+// WechatBotConfig 是创建 WeChatBot 所需的配置。
+type WechatBotConfig struct {
+	WebhookURL     string
+	Token          string
+	EncodingAESKey string
+}
 
-	if webhookURL == "" {
-		log.Fatal("请设置 WECHAT_WEBHOOK_URL 环境变量")
+// NewWeChatBot 创建一个企业微信 Bot 实例。
+// 配置由调用方从配置文件中获取后传入。
+func NewWeChatBot(eng *engine.AgentEngine, cfg WechatBotConfig) *WeChatBot {
+	if cfg.WebhookURL == "" {
+		log.Fatal("微信配置缺失：webhook_url 不能为空")
 	}
 
 	return &WeChatBot{
-		webhookURL: webhookURL,
-		token:      os.Getenv("WECHAT_TOKEN"),
-		aesKey:     os.Getenv("WECHAT_ENCODING_AES_KEY"),
+		webhookURL: cfg.WebhookURL,
+		token:      cfg.Token,
+		aesKey:     cfg.EncodingAESKey,
 		engine:     eng,
 	}
 }

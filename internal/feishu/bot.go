@@ -23,7 +23,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
-	"os"
 	"strings"
 	"time"
 
@@ -46,16 +45,13 @@ type FeishuBot struct {
 }
 
 // NewFeishuBot 创建一个基于长连接的飞书 Bot。
-// 必需环境变量：FEISHU_APP_ID, FEISHU_APP_SECRET。
-func NewFeishuBot(eng *engine.AgentEngine) *FeishuBot {
-	appID := os.Getenv("FEISHU_APP_ID")
-	appSecret := os.Getenv("FEISHU_APP_SECRET")
-
+// appID 和 appSecret 由调用方从配置中获取后传入。
+func NewFeishuBot(eng *engine.AgentEngine, appID, appSecret string) *FeishuBot {
 	if appID == "" || appSecret == "" {
-		log.Fatal("请设置 FEISHU_APP_ID 和 FEISHU_APP_SECRET 环境变量")
+		log.Fatal("飞书配置缺失：app_id 和 app_secret 不能为空")
 	}
 
-	log.Printf("[Feishu] ✅ FEISHU_APP_ID=%s", appID)
+	log.Printf("[Feishu] ✅ APP_ID=%s", appID)
 	log.Printf("[Feishu] 连接模式: WebSocket 长连接（无需公网 IP）")
 
 	client := lark.NewClient(appID, appSecret)

@@ -6,6 +6,7 @@ require (
 	github.com/anthropics/anthropic-sdk-go v1.51.0
 	github.com/larksuite/oapi-sdk-go/v3 v3.9.6
 	github.com/openai/openai-go/v3 v3.41.0
+	gopkg.in/yaml.v3 v3.0.1
 )
 
 require (

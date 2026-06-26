@@ -1,0 +1,21 @@
+# go-tiny-claw 配置文件
+# 复制本文件为 config.yaml 并填入实际值：
+#   cp config.yaml.example config.yaml
+#
+# 优先级：环境变量 > config.yaml > 默认值
+# 环境变量可覆盖此文件中的任何字段，适合 CI/CD 或 Docker 场景。
+
+server:
+  port: 48080          # HTTP 服务端口（微信模式）
+  mode: debug          # debug | release
+
+# 飞书配置（设置 app_id 后自动进入飞书模式）
+feishu:
+  app_id: ""
+  app_secret: ""
+
+# 企业微信配置（设置 webhook_url 后自动进入微信模式）
+wechat:
+  webhook_url: ""      # 群机器人 Webhook 地址
+  token: ""            # 可选，回调签名校验 Token
+  encoding_aes_key: "" # 可选，消息加解密密钥
