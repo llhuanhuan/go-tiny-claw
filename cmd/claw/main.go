@@ -2,10 +2,12 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"log"
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 
 	"github.com/lhuan/go-tiny-claw/internal/engine"
 	"github.com/lhuan/go-tiny-claw/internal/feishu"
@@ -74,18 +76,50 @@ func main() {
 	}
 }
 
-// detectProvider 自动选择合适的 LLM Provider。
+// detectProvider 直接读取 Claude Code (~/.claude/settings.json) 的 env 配置，
+// 注入当前进程环境变量后创建 Anthropic Provider。
+// 无需手动设置任何环境变量，完全复用 Claude Code 已配置的模型和密钥。
 func detectProvider() provider.LLMProvider {
-	if key := os.Getenv("DEEPSEEK_API_KEY"); key != "" {
-		log.Println("[Bootstrap] 检测到 DEEPSEEK_API_KEY，使用 DeepSeek Provider")
-		return provider.NewDeepSeekOpenAIProvider("deepseek-v4-pro")
+	loadClaudeCodeEnv()
+	return provider.NewAnthropicProvider("")
+}
+
+// claudeCodeSettings 是 ~/.claude/settings.json 的部分结构。
+type claudeCodeSettings struct {
+	Env map[string]string `json:"env"`
+}
+
+// loadClaudeCodeEnv 读取 Claude Code 的 settings.json，将其中的 env 字段
+// 注入到当前进程的环境变量中（不覆盖已存在的变量）。
+func loadClaudeCodeEnv() {
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		log.Printf("[Bootstrap] 无法获取用户主目录: %v", err)
+		return
 	}
-	if key := os.Getenv("ZHIPU_API_KEY"); key != "" {
-		log.Println("[Bootstrap] 检测到 ZHIPU_API_KEY，使用 智谱 GLM-4.5 Provider")
-		return provider.NewZhipuOpenAIProvider("glm-4.5-air")
+
+	settingsPath := filepath.Join(homeDir, ".claude", "settings.json")
+
+	data, err := os.ReadFile(settingsPath)
+	if err != nil {
+		log.Printf("[Bootstrap] 无法读取 Claude Code 配置 %s: %v", settingsPath, err)
+		return
 	}
-	log.Fatal("请设置 DEEPSEEK_API_KEY 或 ZHIPU_API_KEY 环境变量")
-	return nil
+
+	var settings claudeCodeSettings
+	if err := json.Unmarshal(data, &settings); err != nil {
+		log.Printf("[Bootstrap] 解析 Claude Code 配置失败: %v", err)
+		return
+	}
+
+	injected := 0
+	for key, val := range settings.Env {
+		if os.Getenv(key) == "" {
+			os.Setenv(key, val)
+			injected++
+		}
+	}
+	log.Printf("[Bootstrap] 已从 Claude Code 配置注入 %d 个环境变量", injected)
 }
 
 // runFeishu 通过 WebSocket 长连接接入飞书。
@@ -137,7 +171,8 @@ func runTerminal(eng *engine.AgentEngine) {
 	}
 
 	log.Printf("[Bootstrap] 终端模式启动，Prompt: %s\n", prompt)
-	if err := eng.Run(context.Background(), prompt, reporter); err != nil {
+	session := engine.GlobalSessionMgr.GetOrCreate("terminal", eng.WorkDir)
+	if err := eng.Run(context.Background(), session, prompt, reporter); err != nil {
 		log.Fatalf("引擎运行崩溃: %v", err)
 	}
 	log.Println("[Bootstrap] Agent 任务执行完毕。")

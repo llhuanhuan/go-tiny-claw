@@ -167,7 +167,8 @@ func (b *WeChatBot) handleAgentRun(chatID string, prompt string) {
 		chatID:     chatID,
 	}
 
-	err := b.engine.Run(context.Background(), prompt, reporter)
+	session := engine.GlobalSessionMgr.GetOrCreate("wechat:"+chatID, b.engine.WorkDir)
+	err := b.engine.Run(context.Background(), session, prompt, reporter)
 	if err != nil {
 		reporter.sendMsg(fmt.Sprintf("❌ Agent 运行崩溃: %v", err))
 	}

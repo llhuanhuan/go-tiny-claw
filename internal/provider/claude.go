@@ -41,6 +41,44 @@ func NewZhipuClaudeProvider(model string) *ClaudeProvider {
 	}
 }
 
+// NewAnthropicProvider 使用 Claude Code 系统配置连接 Anthropic API。
+//
+// 自动读取以下环境变量（通常由 ~/.claude/settings.json 的 env 字段注入）：
+//   - ANTHROPIC_API_KEY / ANTHROPIC_AUTH_TOKEN: API 认证凭据
+//   - ANTHROPIC_BASE_URL: 自定义 API 端点（代理/中转）
+//   - ANTHROPIC_MODEL: 默认模型名称
+func NewAnthropicProvider(model string) *ClaudeProvider {
+	// 认证：优先 API_KEY，回退到 AUTH_TOKEN（Claude Code 代理场景）
+	apiKey := os.Getenv("ANTHROPIC_API_KEY")
+	if apiKey == "" {
+		apiKey = os.Getenv("ANTHROPIC_AUTH_TOKEN")
+	}
+	if apiKey == "" {
+		panic("请设置 ANTHROPIC_API_KEY 或 ANTHROPIC_AUTH_TOKEN（可通过 Claude Code settings.json 配置）")
+	}
+
+	// 模型：参数为空时读取环境变量
+	if model == "" {
+		model = os.Getenv("ANTHROPIC_MODEL")
+	}
+	if model == "" {
+		model = "claude-sonnet-4-20250514"
+	}
+
+	// 构建客户端选项
+	opts := []option.RequestOption{option.WithAPIKey(apiKey)}
+
+	// 自定义 BaseURL（代理/中转场景）
+	if baseURL := os.Getenv("ANTHROPIC_BASE_URL"); baseURL != "" {
+		opts = append(opts, option.WithBaseURL(baseURL))
+	}
+
+	return &ClaudeProvider{
+		client: anthropic.NewClient(opts...),
+		model:  model,
+	}
+}
+
 // buildAnthropicParams 将内部消息和工具定义翻译为 Anthropic SDK 的请求参数。
 // StreamGenerate 和 Generate 共享此翻译逻辑。
 func (p *ClaudeProvider) buildAnthropicParams(msgs []schema.Message, availableTools []schema.ToolDefinition) (anthropic.MessageNewParams, error) {

@@ -142,7 +142,8 @@ func (b *FeishuBot) runAgent(chatID string, prompt string) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
 
-	if err := b.engine.Run(ctx, prompt, reporter); err != nil {
+	session := engine.GlobalSessionMgr.GetOrCreate("feishu:"+chatID, b.engine.WorkDir)
+	if err := b.engine.Run(ctx, session, prompt, reporter); err != nil {
 		reporter.sendMsg(fmt.Sprintf("❌ Agent 运行失败: %v", err))
 	}
 }
