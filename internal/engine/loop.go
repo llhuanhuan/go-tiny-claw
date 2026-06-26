@@ -17,9 +17,8 @@ import (
 type AgentEngine struct {
 	provider provider.LLMProvider
 	registry tools.Registry
-
-	// WorkDir (工作区): 借鉴 OpenClaw 的理念，Agent 必须有一个明确的物理边界
-	WorkDir string
+	composer *ctxpkg.PromptComposer
+	WorkDir  string // 工作区根目录，供外部（bot）创建 Session 时使用
 
 	EnableThinking bool // 慢思考模式开关
 
@@ -37,19 +36,17 @@ type AgentEngine struct {
 	// 锁粒度控制在工具批次级而非整个 Run() 生命周期，避免 Agent 在纯 LLM 推理
 	// 阶段白白阻塞其他 Agent 的读操作。
 	wsRWMu sync.RWMutex
-
-	composer *ctxpkg.PromptComposer // 【新增】引擎持有 Composer 实例
 }
 
 func NewAgentEngine(p provider.LLMProvider, r tools.Registry, workDir string, enableThinking bool) *AgentEngine {
 	return &AgentEngine{
 		provider:       p,
 		registry:       r,
+		composer:       ctxpkg.NewPromptComposer(workDir),
 		WorkDir:        workDir,
 		EnableThinking: enableThinking,
 		taskManager:    tools.GetTaskManager(),
 		trackedTaskIDs: make(map[string]struct{}),
-		composer:       ctxpkg.NewPromptComposer(workDir),
 	}
 }
 
@@ -63,106 +60,77 @@ func (e *AgentEngine) SkillLoader() *ctxpkg.SkillLoader {
 //
 // reporter 是引擎向外界汇报状态的唯一出口。传入 nil 时引擎将静默运行
 // （仅保留 log.Printf 级别的内部日志）。
-func (e *AgentEngine) Run(ctx context.Context, userPrompt string, reporter Reporter) error {
-	log.Printf("[Engine] 引擎启动，锁定工作区: %s\n", e.WorkDir)
-	log.Printf("[Engine] 慢思考模式 (Thinking Phase): %v\n", e.EnableThinking)
+func (e *AgentEngine) Run(ctx context.Context, session *Session, userPrompt string, reporter Reporter) error {
+	log.Printf("[Engine] 唤醒会话 [%s]，锁定工作区: %s\n", session.ID, session.WorkDir)
 
+	// 将用户输入追加到 Session 历史，确保：
+	// 1. Thinking 阶段至少有一条 User 消息（Anthropic API 强制要求）
+	// 2. 多轮对话时 Working Memory 能正确截取到本轮用户输入
+	session.Append(schema.Message{Role: schema.RoleUser, Content: userPrompt})
+
+	// 根据当前 Session 的工作区，动态组装最新的 System Prompt
+	composer := ctxpkg.NewPromptComposer(session.WorkDir)
 	// 【核心修改】动态组装 System Prompt，彻底替换掉以前硬编码的面条提示词！
-	systemMsg := e.composer.Build()
+	systemMsg := composer.Build()
 
 	// 确保引擎退出时清理所有后台进程
 	defer e.taskManager.Shutdown()
 
-	// 1. 初始化会话的 Context (上下文内存)
-	contextHistory := []schema.Message{
-		systemMsg, // 注入动态组装的内核、AGENTS.md 与 Skills
-		{
-			Role:    schema.RoleSystem,
-			Content: "You are go-tiny-claw, an expert coding assistant. You have full access to tools in the workspace.",
-		},
-		{
-			Role:    schema.RoleUser,
-			Content: userPrompt,
-		},
-	}
-
-	turnCount := 0
-
-	// 2. The Main Loop: 心跳开始 (标准的 ReAct 循环)
 	for {
-		turnCount++
-		log.Printf("========== [Turn %d] 开始 ==========\n", turnCount)
-
-		// ----------------------------------------------------------------------
-		// 【异步通知机制】在每轮 Turn 开始前,检查本引擎启动的后台进程是否有新退出的,
-		// 如果有,作为 System 消息注入上下文 —— 这样模型无需手动 poll TaskOutput。
-		// ----------------------------------------------------------------------
-		e.injectBackgroundNotifications(&contextHistory, turnCount)
-
-		// 获取当前挂载的所有工具定义
 		availableTools := e.registry.GetAvailableTools()
+		// 1. 【上下文组装】: System Prompt + 截取最近的 6 条消息作为 Working Memory        // 在实际业务中，由于工具返回结果可能很长，短期工作记忆往往设为 6-10 条足以维系连贯对话
 
-		// ====================================================================
-		// Phase 1: 慢思考阶段 (Thinking) - 剥夺工具，强制规划
-		// ====================================================================
+		workingMemory := session.GetWorkingMemory(6)
+
+		var contextHistory []schema.Message
+
+		contextHistory = append(contextHistory, systemMsg)
+
+		contextHistory = append(contextHistory, workingMemory...)
+
+		// 2. ================= Phase 1: Thinking =================
+
 		if e.EnableThinking {
-			log.Println("[Engine][Phase 1] 剥夺工具访问权，强制进入慢思考与规划阶段...")
-
-			// 【触发 Reporter】: 开始慢思考
 			if reporter != nil {
 				reporter.OnThinking(ctx)
-			} else {
-				fmt.Print("🧠 [内部思考]: ")
 			}
-
-			thinkMsg, err := e.streamGenerate(ctx, contextHistory, nil, true)
+			thinkResp, err := e.provider.Generate(ctx, contextHistory, nil)
 			if err != nil {
 				return fmt.Errorf("Thinking 阶段生成失败: %w", err)
 			}
-			fmt.Println() // 思考结束后换行
-
-			if thinkMsg != nil && thinkMsg.Content != "" {
-				contextHistory = append(contextHistory, *thinkMsg)
-				// 【触发 Reporter】: 思考阶段产出的规划文本
-				if reporter != nil {
-					reporter.OnMessage(ctx, thinkMsg.Content)
-				}
+			if thinkResp.Content != "" {
+				// 将思考过程持久化到 Session 中！
+				session.Append(*thinkResp)
+				// 把它追加到当前这一轮的临时上下文中，供 Action 阶段使用
+				contextHistory = append(contextHistory, *thinkResp)
 			}
-		}
 
-		// ====================================================================
-		// Phase 2: 行动阶段 (Action) - 恢复工具，顺着规划执行
-		// ====================================================================
-		log.Println("[Engine][Phase 2] 恢复工具挂载，等待模型采取行动...")
-		if reporter == nil {
-			fmt.Print("🤖 ")
 		}
-
-		actionMsg, err := e.streamGenerate(ctx, contextHistory, availableTools, false)
+		// 3. ================= Phase 2: Action =================
+		actionResp, err := e.provider.Generate(ctx, contextHistory, availableTools)
 		if err != nil {
 			return fmt.Errorf("Action 阶段生成失败: %w", err)
 		}
-		fmt.Println() // 回复结束后换行
+		// 将大模型的行动响应持久化到 Session 中
+		session.Append(*actionResp)
 
-		contextHistory = append(contextHistory, *actionMsg)
+		contextHistory = append(contextHistory, *actionResp)
 
-		// 当模型输出纯文本（未并发工具调用时包含总结/汇报），通过 Reporter 上报
-		if actionMsg.Content != "" && reporter != nil {
-			reporter.OnMessage(ctx, actionMsg.Content)
+		if actionResp.Content != "" && reporter != nil {
+			reporter.OnMessage(ctx, actionResp.Content)
 		}
 
-		// 3. 退出条件判断
-		if len(actionMsg.ToolCalls) == 0 {
-			log.Println("[Engine] 模型未请求调用工具，任务宣告完成。")
+		if len(actionResp.ToolCalls) == 0 {
+			// 如果没有工具调用，说明本次任务已完成，打破 ReAct 循环，挂起等待人类的下一条指令
 			break
 		}
 
-		// 4. 并行执行工具调用 (Parallel Execution)
-		log.Printf("[Engine] 模型请求调用 %d 个工具...\n", len(actionMsg.ToolCalls))
+		// 4. ================= 并发执行底层工具 =================
+		e.executeToolsInParallel(ctx, actionResp.ToolCalls, &contextHistory, reporter)
 
-		e.executeToolsInParallel(ctx, actionMsg.ToolCalls, &contextHistory, reporter)
-
-		// 循环回到开头，模型将带着新加入的 Observation 继续它的下一轮思考...
+		// 将本轮工具执行结果（Observation）持久化到 Session 中
+		observationMsgs := contextHistory[len(contextHistory)-len(actionResp.ToolCalls):]
+		session.Append(observationMsgs...)
 	}
 
 	return nil
