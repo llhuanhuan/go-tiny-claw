@@ -43,27 +43,70 @@ func (s *Session) Append(msgs ...schema.Message) {
 }
 
 // GetWorkingMemory 是驾驭工程的核心！
-// 它不返回全量历史，而是从后往前截取最近的 N 条消息，形成 Agent 的“短期工作记忆”。
-func (s *Session) GetWorkingMemory(limit int) []schema.Message {
+// 它不返回全量历史，而是从后往前截取消息，形成 Agent 的"短期工作记忆"。
+//
+// 双维度截断算法（类似限流中的滑动窗口）：
+//   - limit:    最大消息条数（0 表示不限制条数）
+//   - maxChars: 最大字符总数预算（0 表示不限制字符数）
+//
+// 两个维度取"先到先停"——哪个条件先触发就停止累积。
+// 这样即使 limit 设得很宽松（比如 10 条），只要其中一条 ToolResult 有 1 万行输出，
+// 字符预算也会提前触发截断，防止工作记忆超出模型上下文窗口的物理上限。
+func (s *Session) GetWorkingMemory(limit int, maxChars int) []schema.Message {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
 	total := len(s.history)
-	if total <= limit || limit <= 0 {
-		// 如果历史总量小于限制，或者不设限，全量返回 (需要深拷贝以防外部修改)
+
+	// 快速路径：两个维度都不限制，全量返回
+	if limit <= 0 && maxChars <= 0 {
 		res := make([]schema.Message, total)
 		copy(res, s.history)
 		return res
 	}
 
-	// 截取最近的 limit 条消息
-	res := make([]schema.Message, limit)
-	copy(res, s.history[total-limit:])
+	// 快速路径：总消息数未超限且总字符数未超预算，全量返回
+	if (limit <= 0 || total <= limit) && (maxChars <= 0 || estimateChars(s.history) <= maxChars) {
+		res := make([]schema.Message, total)
+		copy(res, s.history)
+		return res
+	}
+
+	// ——————————————————————————————————————————
+	// 核心：从后往前滑动窗口，双维度累积
+	// ——————————————————————————————————————————
+	usedChars := 0
+	end := total // 不含 end（左闭右开 [start, end)）
+
+	for i := total - 1; i >= 0; i-- {
+		msgChars := estimateMsgChars(&s.history[i])
+
+		// 检查条数限制：如果加上当前消息会超出 limit，停止
+		if limit > 0 && (total-i) > limit {
+			break
+		}
+
+		// 检查字符预算：如果加上当前消息会超出 maxChars，停止
+		if maxChars > 0 && (usedChars+msgChars) > maxChars {
+			break
+		}
+
+		usedChars += msgChars
+		end = i
+	}
+
+	// 至少保留最后一条消息（即使它单独就超预算，否则会返回空记忆导致死循环）
+	if end == total {
+		end = total - 1
+	}
+
+	res := make([]schema.Message, total-end)
+	copy(res, s.history[end:])
 
 	// 【驾驭防线】：大模型 API 强制要求历史消息的连续性！
 	// 如果我们截断的第一条消息恰好是一个 ToolResult (RoleUser 且含有 ToolCallID)，
 	// 但发出这个请求的 ToolCall 被我们截断抛弃了，大模型 API 会直接报 400 Bad Request。
-	// 因此，如果切片首条属于“孤儿”工具响应，我们必须将其强行舍弃，顺延到下一条正常的 User/Assistant 消息。
+	// 因此，如果切片首条属于"孤儿"工具响应，我们必须将其强行舍弃，顺延到下一条正常的 User/Assistant 消息。
 	for len(res) > 0 {
 		if res[0].Role == schema.RoleUser && res[0].ToolCallID != "" {
 			res = res[1:]
@@ -73,6 +116,26 @@ func (s *Session) GetWorkingMemory(limit int) []schema.Message {
 	}
 
 	return res
+}
+
+// estimateMsgChars 估算单条消息的字符开销（作为 Token 数的近似代理）。
+// 包含 Content 正文 + 所有 ToolCalls 的 JSON Arguments 序列化长度。
+func estimateMsgChars(msg *schema.Message) int {
+	n := len(msg.Content)
+	for _, tc := range msg.ToolCalls {
+		n += len(tc.Name)
+		n += len(tc.Arguments)
+	}
+	return n
+}
+
+// estimateChars 批量估算消息切片的总字符开销。
+func estimateChars(msgs []schema.Message) int {
+	total := 0
+	for i := range msgs {
+		total += estimateMsgChars(&msgs[i])
+	}
+	return total
 }
 
 // ==========================================

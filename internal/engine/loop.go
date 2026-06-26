@@ -78,9 +78,10 @@ func (e *AgentEngine) Run(ctx context.Context, session *Session, userPrompt stri
 
 	for {
 		availableTools := e.registry.GetAvailableTools()
-		// 1. 【上下文组装】: System Prompt + 截取最近的 6 条消息作为 Working Memory        // 在实际业务中，由于工具返回结果可能很长，短期工作记忆往往设为 6-10 条足以维系连贯对话
-
-		workingMemory := session.GetWorkingMemory(6)
+		// 1. 【上下文组装】: System Prompt + 双维度截取 Working Memory
+		//    - 最多 6 条消息（条数维度）
+		//    - 最多 50000 字符（Token 预算维度，防止巨型 ToolResult 撑爆上下文）
+		workingMemory := session.GetWorkingMemory(6, 50000)
 
 		var contextHistory []schema.Message
 

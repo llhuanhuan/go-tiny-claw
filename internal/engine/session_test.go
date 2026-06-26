@@ -101,7 +101,7 @@ func TestWorkingMemory_Truncation_SecretFlush(t *testing.T) {
 	}
 
 	// Working Memory 只保留最近 6 条
-	wm := session.GetWorkingMemory(6)
+	wm := session.GetWorkingMemory(6, 0)
 
 	// 验证：密钥不应出现在 Working Memory 中
 	for _, msg := range wm {
@@ -145,7 +145,7 @@ func TestConcurrentSessions_Isolation(t *testing.T) {
 			}
 
 			// 并发读取 Working Memory
-			wm := sess.GetWorkingMemory(6)
+			wm := sess.GetWorkingMemory(6, 0)
 			if len(wm) > 6 {
 				t.Errorf("[%s] Working Memory 超出限制: %d", sessionID, len(wm))
 			}
@@ -203,7 +203,7 @@ func TestWorkingMemory_OrphanToolResultSkipped(t *testing.T) {
 
 	// limit=3 截断后，第一条应该是 ToolResult (孤儿)，
 	// GetWorkingMemory 应自动跳过它
-	wm := session.GetWorkingMemory(3)
+	wm := session.GetWorkingMemory(3, 0)
 
 	if len(wm) == 0 {
 		t.Fatal("Working Memory 不应为空")
@@ -258,7 +258,7 @@ func TestSession_ReActChain(t *testing.T) {
 	session.Append(assistantMsg("已提交，commit hash: abc1234"))
 
 	// 验证完整历史
-	wm := session.GetWorkingMemory(100) // 不截断
+	wm := session.GetWorkingMemory(100, 0) // 不截断
 	if len(wm) != 9 {
 		t.Fatalf("期望 9 条消息, 得到 %d", len(wm))
 	}
@@ -327,7 +327,7 @@ func TestSession_ConcurrentReadWrite(t *testing.T) {
 			case <-ctx.Done():
 				return
 			default:
-				wm := session.GetWorkingMemory(6)
+				wm := session.GetWorkingMemory(6, 0)
 				_ = len(wm) // 只要不 panic 就算通过
 			}
 		}
@@ -368,7 +368,7 @@ func TestMultiPlatformSessionIsolation(t *testing.T) {
 			}
 
 			// 验证 Working Memory 中只包含自己的消息
-			wm := p.session.GetWorkingMemory(6)
+			wm := p.session.GetWorkingMemory(6, 0)
 			for _, msg := range wm {
 				expectedPrefix := fmt.Sprintf("[%s]", p.id)
 				if len(msg.Content) < len(expectedPrefix) {
@@ -386,7 +386,7 @@ func TestMultiPlatformSessionIsolation(t *testing.T) {
 
 	// 最终验证：每个 Session 的总消息数都是 40 (20 user + 20 assistant)
 	for _, ps := range platforms {
-		wm := ps.session.GetWorkingMemory(0) // 0 = 不限制，返回全量
+		wm := ps.session.GetWorkingMemory(0, 0) // 0,0 = 不限制，返回全量
 		if len(wm) != 40 {
 			t.Errorf("[%s] 期望 40 条消息, 得到 %d", ps.id, len(wm))
 		}
@@ -419,7 +419,7 @@ func TestSession_TimestampUpdates(t *testing.T) {
 func TestWorkingMemory_EmptySession(t *testing.T) {
 	session := NewSession("empty", t.TempDir())
 
-	wm := session.GetWorkingMemory(6)
+	wm := session.GetWorkingMemory(6, 0)
 	if len(wm) != 0 {
 		t.Fatalf("空 Session 的 Working Memory 应为空, 得到 %d 条", len(wm))
 	}
@@ -437,8 +437,159 @@ func TestWorkingMemory_ZeroLimit(t *testing.T) {
 		session.Append(userMsg(fmt.Sprintf("msg %d", i)))
 	}
 
-	wm := session.GetWorkingMemory(0)
+	wm := session.GetWorkingMemory(0, 0)
 	if len(wm) != 100 {
 		t.Fatalf("limit=0 应返回全量 100 条, 得到 %d", len(wm))
+	}
+}
+
+// ============================================================
+// 场景 11: 双维度截断 —— maxChars 先于 limit 触发
+// ============================================================
+
+// TestWorkingMemory_MaxCharsTruncatesBeforeLimit 模拟用户描述的核心场景：
+// limit=10（很宽松），但中间有一条巨型 ToolResult（1 万字符），
+// maxChars=500 会提前触发截断，防止工作记忆撑爆上下文。
+func TestWorkingMemory_MaxCharsTruncatesBeforeLimit(t *testing.T) {
+	session := NewSession("max_chars_test", t.TempDir())
+
+	// 先加几条普通消息
+	session.Append(userMsg("第一条普通消息"))
+	session.Append(assistantMsg("好的"))
+
+	// 制造一条巨型 ToolResult（约 10000 字符）
+	giantContent := make([]byte, 10000)
+	for i := range giantContent {
+		giantContent[i] = 'X'
+	}
+	session.Append(toolCallMsg("tc_giant", "read_file", map[string]string{"path": "huge.log"}))
+	session.Append(toolResultMsg("tc_giant", string(giantContent)))
+
+	// 再加几条普通消息
+	session.Append(userMsg("帮我分析一下"))
+	session.Append(assistantMsg("分析完毕"))
+
+	// limit=10（够宽松），maxChars=500（严格）
+	// 预期：maxChars 先触发，只保留最后几条消息，不含那条 10000 字符的巨型结果
+	wm := session.GetWorkingMemory(10, 500)
+
+	totalChars := 0
+	for _, msg := range wm {
+		totalChars += len(msg.Content)
+	}
+
+	// 总字符数不应超过 maxChars（允许一条超大消息的容差）
+	if totalChars > 500*2 {
+		t.Fatalf("maxChars=500 截断失效: 实际字符数=%d", totalChars)
+	}
+
+	// 最后的消息 "分析完毕" 应该被保留
+	last := wm[len(wm)-1]
+	if last.Content != "分析完毕" {
+		t.Fatalf("最后一条消息应为 '分析完毕', 得到 %q", last.Content)
+	}
+}
+
+// ============================================================
+// 场景 12: 双维度截断 —— limit 先于 maxChars 触发
+// ============================================================
+
+// TestWorkingMemory_LimitTruncatesBeforeMaxChars 当 maxChars 预算很充裕时，
+// 应退化为与旧版相同的"按条数截断"行为。
+func TestWorkingMemory_LimitTruncatesBeforeMaxChars(t *testing.T) {
+	session := NewSession("limit_first", t.TempDir())
+
+	for i := 0; i < 20; i++ {
+		session.Append(userMsg(fmt.Sprintf("消息 %d", i)))
+		session.Append(assistantMsg(fmt.Sprintf("回复 %d", i)))
+	}
+
+	// limit=4, maxChars=100000（很宽松）
+	// 预期：limit 先触发，只保留 4 条
+	wm := session.GetWorkingMemory(4, 100000)
+
+	if len(wm) != 4 {
+		t.Fatalf("期望 4 条, 得到 %d", len(wm))
+	}
+
+	// 验证是最后 4 条
+	if wm[0].Content != "消息 18" {
+		t.Fatalf("期望首条为 '消息 18', 得到 %q", wm[0].Content)
+	}
+}
+
+// ============================================================
+// 场景 13: maxChars 保证至少返回 1 条消息（防空死循环）
+// ============================================================
+
+// TestWorkingMemory_MaxCharsAlwaysReturnsAtLeastOne 即使单条消息
+// 独自就超出 maxChars 预算，也必须至少返回最后一条消息。
+func TestWorkingMemory_MaxCharsAlwaysReturnsAtLeastOne(t *testing.T) {
+	session := NewSession("at_least_one", t.TempDir())
+
+	// 一条 2000 字符的消息
+	bigContent := make([]byte, 2000)
+	for i := range bigContent {
+		bigContent[i] = 'A'
+	}
+	session.Append(userMsg(string(bigContent)))
+
+	// maxChars=100（远小于单条消息），但至少返回 1 条
+	wm := session.GetWorkingMemory(10, 100)
+
+	if len(wm) < 1 {
+		t.Fatal("即使单条消息超预算，也应至少返回 1 条消息")
+	}
+}
+
+// ============================================================
+// 场景 14: 双维度截断后孤儿 ToolResult 仍被清理
+// ============================================================
+
+// TestWorkingMemory_MaxCharsOrphanCleanup 验证 maxChars 截断后
+// 首条如果是孤儿 ToolResult，仍然会被正确跳过。
+func TestWorkingMemory_MaxCharsOrphanCleanup(t *testing.T) {
+	session := NewSession("max_chars_orphan", t.TempDir())
+
+	session.Append(toolCallMsg("tc_orphan", "bash", map[string]string{"command": "ls"}))
+	session.Append(toolResultMsg("tc_orphan", "file1.go\nfile2.go"))
+	session.Append(userMsg("继续"))
+	session.Append(assistantMsg("好的"))
+
+	// limit=3, maxChars=0（不限字符）→ 行为应与旧版一致
+	wm := session.GetWorkingMemory(3, 0)
+
+	if len(wm) == 0 {
+		t.Fatal("Working Memory 不应为空")
+	}
+	if wm[0].ToolCallID != "" {
+		t.Fatalf("首条是孤儿 ToolResult，应被跳过: ToolCallID=%s", wm[0].ToolCallID)
+	}
+	if wm[0].Content != "继续" {
+		t.Fatalf("期望首条为 '继续', 得到 %q", wm[0].Content)
+	}
+}
+
+// ============================================================
+// 场景 15: maxChars=0 退化为纯条数截断（向后兼容）
+// ============================================================
+
+// TestWorkingMemory_MaxCharsZeroBackwardCompat 验证 maxChars=0 时
+// 行为与旧版 GetWorkingMemory(limit) 完全一致。
+func TestWorkingMemory_MaxCharsZeroBackwardCompat(t *testing.T) {
+	session := NewSession("backward_compat", t.TempDir())
+
+	for i := 0; i < 10; i++ {
+		session.Append(userMsg(fmt.Sprintf("msg %d", i)))
+	}
+
+	// maxChars=0 → 不限字符，只按条数
+	wm := session.GetWorkingMemory(3, 0)
+
+	if len(wm) != 3 {
+		t.Fatalf("maxChars=0 应退化为纯条数截断: 期望 3 条, 得到 %d", len(wm))
+	}
+	if wm[0].Content != "msg 7" {
+		t.Fatalf("期望首条为 'msg 7', 得到 %q", wm[0].Content)
 	}
 }
