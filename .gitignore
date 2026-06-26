@@ -20,3 +20,10 @@ go.work
 .vscode/
 *.swp
 *.swo
+
+# Secrets
+.env
+.env.*
+*.pem
+*.key
+secrets.*
