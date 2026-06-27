@@ -39,8 +39,10 @@ type AgentEngine struct {
 	// 锁粒度控制在工具批次级而非整个 Run() 生命周期，避免 Agent 在纯 LLM 推理
 	// 阶段白白阻塞其他 Agent 的读操作。
 	wsRWMu    sync.RWMutex
-	compactor *ctxpkg.Compactor // 压缩器实例，防止大模型上下文 OOM
-	PlanMode  bool              // 【新增】暴露给外部的计划模式开关
+	compactor *ctxpkg.Compactor       // 压缩器实例，防止大模型上下文 OOM
+	PlanMode  bool                    // 暴露给外部的计划模式开关
+	recovery  *ctxpkg.RecoveryManager // 自愈管理器
+	injector  *ReminderInjector       // 提醒注入器
 }
 
 func NewAgentEngine(p provider.LLMProvider, r tools.Registry, workDir string, enableThinking bool, planMode bool) *AgentEngine {
@@ -56,6 +58,8 @@ func NewAgentEngine(p provider.LLMProvider, r tools.Registry, workDir string, en
 		//  并保护最近的 6 条消息（大约两轮 Turn 的交互）
 		compactor: ctxpkg.NewCompactor(3000, 6),
 		PlanMode:  planMode,
+		recovery:  ctxpkg.NewRecoveryManager(),
+		injector:  NewReminderInjector(),
 	}
 }
 
@@ -199,6 +203,7 @@ func (e *AgentEngine) Run(ctx context.Context, session *Session, userPrompt stri
 		if err != nil {
 			return fmt.Errorf("Action 阶段生成失败: %w", err)
 		}
+
 		// 【驾驭精髓】：注意，写入 Session（硬盘/全量内存）的永远是全量的真实响应，不受 Compact 影响！
 		// // Compact 只作用于本轮发给大模型的那个临时 Context。
 		session.Append(*actionResp)
@@ -215,11 +220,22 @@ func (e *AgentEngine) Run(ctx context.Context, session *Session, userPrompt stri
 		}
 
 		// 4. ================= 并发执行底层工具 =================
-		e.executeToolsInParallel(ctx, actionResp.ToolCalls, &contextHistory, reporter)
+		lastToolCall, lastResult := e.executeToolsInParallel(ctx, actionResp.ToolCalls, &contextHistory, reporter)
 
 		// 将本轮工具执行结果（Observation）持久化到 Session 中
 		observationMsgs := contextHistory[len(contextHistory)-len(actionResp.ToolCalls):]
 		session.Append(observationMsgs...)
+
+		// 2. 【核心防线】：在准备进入下一轮之前，进行死循环探测！
+		//    取本轮最后一个工具调用及其执行结果，交给 ReminderInjector 诊断。
+		//    如果连续 N 次相同参数的失败被检测到，注入严厉提醒打破执念。
+		reminderMsg := e.injector.CheckAndInject(lastToolCall, lastResult)
+		if reminderMsg != nil {
+			// 如果触发了干预规则，将这条严厉的提醒作为 User 消息，强制追加到 Session 的最末尾！
+			// 大模型在下一轮被唤醒时，第一眼就会看到这句话，从而打破局部执念。
+			session.Append(*reminderMsg)
+			log.Printf("[Engine] ⚠️ 触发死循环干预！注入修正指令到 Session\n")
+		}
 	}
 
 	return nil
@@ -386,13 +402,14 @@ func (e *AgentEngine) consumeStream(ctx context.Context, ch <-chan provider.Stre
 //     的追加顺序始终等于模型输出 ToolCalls 的原始顺序。
 //  4. 后台任务感知：引擎在执行 Bash 工具时,通过对比执行前后的 TaskManager 状态
 //     自动发现新启动的后台进程,加入追踪集合用于后续异步通知。
-func (e *AgentEngine) executeToolsInParallel(ctx context.Context, toolCalls []schema.ToolCall, contextHistory *[]schema.Message, reporter Reporter) {
+func (e *AgentEngine) executeToolsInParallel(ctx context.Context, toolCalls []schema.ToolCall, contextHistory *[]schema.Message, reporter Reporter) (schema.ToolCall, schema.ToolResult) {
 	n := len(toolCalls)
 
 	// 预分配结果槽位，每个 goroutine 写入自己的索引，无需互斥锁
 	type slot struct {
-		call   schema.ToolCall
-		result schema.ToolResult
+		call        schema.ToolCall
+		result      schema.ToolResult
+		finalOutput string
 	}
 	slots := make([]slot, n)
 
@@ -437,15 +454,24 @@ func (e *AgentEngine) executeToolsInParallel(ctx context.Context, toolCalls []sc
 
 			result := e.registry.Execute(ctx, tc)
 
+			// 【核心拦截与注入】
+			finalOutput := result.Output
+			if result.IsError {
+				// 发生错误，交由 RecoveryManager 诊断并注入“锦囊妙计”
+				finalOutput = e.recovery.AnalyzeAndInject(tc.Name, result.Output)
+				log.Printf(" -> [Go-%d] ❌ 注入救援指南: %s\n", i, finalOutput)
+			} else {
+				log.Printf("  -> [Go-%d] ✅ 工具执行成功 (返回 %d 字节)\n", i, len(result.Output))
+			}
 			// 【触发 Reporter】: 汇报工具执行结果（截断过长输出）
 			if reporter != nil {
-				displayOutput := result.Output
+				displayOutput := finalOutput
 				if len(displayOutput) > 200 {
 					displayOutput = displayOutput[:200] + "... (已截断)"
 				}
 				reporter.OnToolResult(ctx, tc.Name, displayOutput, result.IsError)
 			}
-			slots[i] = slot{call: tc, result: result}
+			slots[i] = slot{call: tc, result: result, finalOutput: finalOutput}
 		}
 	} else {
 		// 并行路径：全读批次，Goroutine 并发执行。
@@ -495,15 +521,25 @@ func (e *AgentEngine) executeToolsInParallel(ctx context.Context, toolCalls []sc
 				result := e.registry.Execute(ctx, call)
 				e.wsRWMu.RUnlock()
 
+				// 【核心拦截与注入】
+				finalOutput := result.Output
+				if result.IsError {
+					// 发生错误，交由 RecoveryManager 诊断并注入“锦囊妙计”
+					finalOutput = e.recovery.AnalyzeAndInject(call.Name, result.Output)
+					log.Printf(" -> [Go-%d] ❌ 注入救援指南: %s\n", idx, finalOutput)
+				} else {
+					log.Printf("  -> [Go-%d] ✅ 工具执行成功 (返回 %d 字节)\n", idx, len(result.Output))
+				}
+
 				// 【触发 Reporter】: 汇报工具执行结果（截断过长输出）
 				if reporter != nil {
-					displayOutput := result.Output
+					displayOutput := finalOutput
 					if len(displayOutput) > 200 {
 						displayOutput = displayOutput[:200] + "... (已截断)"
 					}
 					reporter.OnToolResult(ctx, call.Name, displayOutput, result.IsError)
 				}
-				slots[idx] = slot{call: call, result: result}
+				slots[idx] = slot{call: call, result: result, finalOutput: finalOutput}
 			}(i, tc)
 		}
 
@@ -513,7 +549,7 @@ func (e *AgentEngine) executeToolsInParallel(ctx context.Context, toolCalls []sc
 	// 按原始顺序（索引 0 → n-1）将 Observation 组装回上下文
 	for _, s := range slots {
 		if s.result.IsError {
-			log.Printf("  -> ❌ 工具执行报错 [%s]: %s\n", s.call.Name, s.result.Output)
+			log.Printf("  -> ❌ 工具执行报错 [%s]: %s\n", s.call.Name, s.finalOutput)
 		} else {
 			log.Printf("  -> ✅ 工具执行成功 [%s] (返回 %d 字节)\n", s.call.Name, len(s.result.Output))
 		}
@@ -522,7 +558,7 @@ func (e *AgentEngine) executeToolsInParallel(ctx context.Context, toolCalls []sc
 		// 注意：ToolCallID 必须携带！这是维系大模型推理链条的关键
 		observationMsg := schema.Message{
 			Role:       schema.RoleUser,
-			Content:    s.result.Output,
+			Content:    s.finalOutput,
 			ToolCallID: s.call.ID,
 		}
 		*contextHistory = append(*contextHistory, observationMsg)
@@ -538,6 +574,10 @@ func (e *AgentEngine) executeToolsInParallel(ctx context.Context, toolCalls []sc
 		}
 	}
 	e.trackedTaskIDsMu.Unlock()
+
+	// 返回本轮最后一个工具调用及其原始结果，供上层进行死循环探测
+	last := slots[n-1]
+	return last.call, last.result
 }
 func (e *AgentEngine) isWriteTool(name string) bool {
 	switch name {
