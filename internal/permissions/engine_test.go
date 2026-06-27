@@ -30,6 +30,7 @@ rules:
     enabled: true
 settings:
   default_action: "ask"
+  hot_reload_interval: 1
 `
 
 func TestEngine_Load(t *testing.T) {
@@ -146,12 +147,12 @@ rules:
     enabled: true
 settings:
   default_action: "ask"
+  hot_reload_interval: 1
 `
 	time.Sleep(200 * time.Millisecond) // 确保文件系统时间戳更新
 	os.WriteFile(configPath, []byte(newConfig), 0644)
 
 	// 启动热更新（使用较短的检查间隔）
-	engine.config.Settings.HotReloadInterval = 1
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	go engine.StartHotReload(ctx)

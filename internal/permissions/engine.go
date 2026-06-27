@@ -7,6 +7,7 @@ import (
 	"regexp"
 	"sort"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -64,23 +65,34 @@ type PermissionResult struct {
 	Matched bool // 是否匹配到规则
 }
 
+// configSnapshot 配置快照（用于 Copy-on-Write）
+type configSnapshot struct {
+	config       *PermissionConfig
+	sortedRules  []Rule // 预排序的规则
+	compiled     bool
+}
+
 // =============================================================================
 // 权限引擎
 // =============================================================================
 
 // Engine 动态权限判定引擎
+// 采用 Copy-on-Write 模式：读操作无锁，写操作原子替换
 type Engine struct {
-	mu           sync.RWMutex
-	config       *PermissionConfig
 	configPath   string
-	compiled     bool
 	stopCh       chan struct{}
-	
-	// 统计信息
-	totalChecks  int64
-	allowCount   int64
-	askCount     int64
-	denyCount    int64
+
+	// 原子配置指针（Copy-on-Write）
+	config       atomic.Pointer[configSnapshot]
+
+	// 统计信息（原子操作）
+	totalChecks  atomic.Int64
+	allowCount   atomic.Int64
+	askCount     atomic.Int64
+	denyCount    atomic.Int64
+
+	// 用于热更新的互斥锁（只保护加载过程）
+	loadMu       sync.Mutex
 }
 
 // NewEngine 创建权限引擎实例
@@ -93,10 +105,12 @@ func NewEngine(configPath string) *Engine {
 }
 
 // Load 加载配置文件
+// 使用 Copy-on-Write 模式：先解析到临时变量，再原子替换
 func (e *Engine) Load() error {
-	e.mu.Lock()
-	defer e.mu.Unlock()
+	e.loadMu.Lock()
+	defer e.loadMu.Unlock()
 
+	// 1. 读取并解析配置文件（在锁外进行 I/O）
 	data, err := readFile(e.configPath)
 	if err != nil {
 		return fmt.Errorf("读取配置文件失败: %w", err)
@@ -107,20 +121,34 @@ func (e *Engine) Load() error {
 		return fmt.Errorf("解析配置文件失败: %w", err)
 	}
 
-	// 编译正则表达式
-	if err := e.compileRules(&config); err != nil {
+	// 2. 编译正则表达式（在锁外进行 CPU 密集操作）
+	if err := compileRules(&config); err != nil {
 		return fmt.Errorf("编译规则失败: %w", err)
 	}
 
-	e.config = &config
-	e.compiled = true
+	// 3. 预排序规则（避免每次 Check 都排序）
+	sortedRules := make([]Rule, len(config.Rules))
+	copy(sortedRules, config.Rules)
+	sort.Slice(sortedRules, func(i, j int) bool {
+		return sortedRules[i].Priority > sortedRules[j].Priority
+	})
+
+	// 4. 创建配置快照
+	snapshot := &configSnapshot{
+		config:      &config,
+		sortedRules: sortedRules,
+		compiled:    true,
+	}
+
+	// 5. 原子替换配置指针（无锁操作）
+	e.config.Store(snapshot)
 
 	log.Printf("[Permissions] 已加载配置: %s, 规则数: %d", e.configPath, len(config.Rules))
 	return nil
 }
 
 // compileRules 编译所有规则的正则表达式
-func (e *Engine) compileRules(config *PermissionConfig) error {
+func compileRules(config *PermissionConfig) error {
 	for i := range config.Rules {
 		rule := &config.Rules[i]
 		if !rule.Enabled {
@@ -137,13 +165,15 @@ func (e *Engine) compileRules(config *PermissionConfig) error {
 }
 
 // Check 检查命令权限
+// 无锁读取，高性能并发访问
 func (e *Engine) Check(ctx context.Context, command string) PermissionResult {
-	e.mu.RLock()
-	defer e.mu.RUnlock()
+	// 原子递增统计
+	e.totalChecks.Add(1)
 
-	e.totalChecks++
-
-	if !e.compiled || e.config == nil {
+	// 原子加载配置快照（无锁）
+	snapshot := e.config.Load()
+	if snapshot == nil || !snapshot.compiled || snapshot.config == nil {
+		e.askCount.Add(1)
 		return PermissionResult{
 			Action:  ActionAsk,
 			Reason:  "权限引擎未初始化",
@@ -151,24 +181,21 @@ func (e *Engine) Check(ctx context.Context, command string) PermissionResult {
 		}
 	}
 
-	// 按优先级排序规则（高优先级先匹配）
-	sortedRules := e.getSortedRules()
-
-	// 匹配第一条命中的规则
-	for _, rule := range sortedRules {
+	// 使用预排序的规则（避免每次排序）
+	for _, rule := range snapshot.sortedRules {
 		if !rule.Enabled || rule.regex == nil {
 			continue
 		}
 
 		if rule.regex.MatchString(command) {
-			// 更新统计
+			// 原子更新统计
 			switch rule.Action {
 			case ActionAllow:
-				e.allowCount++
+				e.allowCount.Add(1)
 			case ActionAsk:
-				e.askCount++
+				e.askCount.Add(1)
 			case ActionDeny:
-				e.denyCount++
+				e.denyCount.Add(1)
 			}
 
 			return PermissionResult{
@@ -181,14 +208,14 @@ func (e *Engine) Check(ctx context.Context, command string) PermissionResult {
 	}
 
 	// 没有匹配到规则，使用默认动作
-	defaultAction := e.config.Settings.DefaultAction
+	defaultAction := snapshot.config.Settings.DefaultAction
 	switch defaultAction {
 	case ActionAllow:
-		e.allowCount++
+		e.allowCount.Add(1)
 	case ActionAsk:
-		e.askCount++
+		e.askCount.Add(1)
 	case ActionDeny:
-		e.denyCount++
+		e.denyCount.Add(1)
 	}
 
 	return PermissionResult{
@@ -198,21 +225,13 @@ func (e *Engine) Check(ctx context.Context, command string) PermissionResult {
 	}
 }
 
-// getSortedRules 获取按优先级排序的规则
-func (e *Engine) getSortedRules() []Rule {
-	rules := make([]Rule, len(e.config.Rules))
-	copy(rules, e.config.Rules)
-	sort.Slice(rules, func(i, j int) bool {
-		return rules[i].Priority > rules[j].Priority
-	})
-	return rules
-}
-
 // StartHotReload 启动热更新监听
 func (e *Engine) StartHotReload(ctx context.Context) {
+	// 从配置中获取更新间隔
+	snapshot := e.config.Load()
 	interval := 5 * time.Second
-	if e.config != nil && e.config.Settings.HotReloadInterval > 0 {
-		interval = time.Duration(e.config.Settings.HotReloadInterval) * time.Second
+	if snapshot != nil && snapshot.config != nil && snapshot.config.Settings.HotReloadInterval > 0 {
+		interval = time.Duration(snapshot.config.Settings.HotReloadInterval) * time.Second
 	}
 
 	ticker := time.NewTicker(interval)
@@ -254,15 +273,20 @@ func (e *Engine) Stop() {
 
 // GetStats 获取统计信息
 func (e *Engine) GetStats() map[string]interface{} {
-	e.mu.RLock()
-	defer e.mu.RUnlock()
+	snapshot := e.config.Load()
+	rulesCount := 0
+	compiled := false
+	if snapshot != nil {
+		rulesCount = len(snapshot.config.Rules)
+		compiled = snapshot.compiled
+	}
 
 	return map[string]interface{}{
-		"total_checks": e.totalChecks,
-		"allow_count":  e.allowCount,
-		"ask_count":    e.askCount,
-		"deny_count":   e.denyCount,
-		"rules_count":  len(e.config.Rules),
-		"compiled":     e.compiled,
+		"total_checks": e.totalChecks.Load(),
+		"allow_count":  e.allowCount.Load(),
+		"ask_count":    e.askCount.Load(),
+		"deny_count":   e.denyCount.Load(),
+		"rules_count":  rulesCount,
+		"compiled":     compiled,
 	}
 }
