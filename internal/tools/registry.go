@@ -20,7 +20,9 @@ type BaseTool interface {
 	Execute(ctx context.Context, args json.RawMessage) (string, error)
 }
 
-// internal/tools/registry.go (续)
+// MiddlewareFunc 定义了中间件的签名。
+// // 它接收当前的 ToolCall，并返回一个是否允许执行的布尔值 (allowed)，以及拦截时的原因 (rejectReason)
+type MiddlewareFunc func(ctx context.Context, call schema.ToolCall) (allowed bool, rejectReason string)
 
 // Registry 定义了工具的注册与分发接口
 type Registry interface {
@@ -32,17 +34,23 @@ type Registry interface {
 
 	// Execute 实际路由并执行模型请求的工具调用
 	Execute(ctx context.Context, call schema.ToolCall) schema.ToolResult
+
+	// 全局Middleware 挂载点
+	Use(mw MiddlewareFunc)
 }
 
 // registryImpl 是 Registry 接口的默认实现
 type registryImpl struct {
 	// 使用 map 以工具的 Name 作为 Key 进行快速 O(1) 路由查找
 	tools map[string]BaseTool
+	// 保存挂载的中间件链
+	middlewares []MiddlewareFunc
 }
 
 func NewRegistry() Registry {
 	return &registryImpl{
-		tools: make(map[string]BaseTool),
+		tools:       make(map[string]BaseTool),
+		middlewares: make([]MiddlewareFunc, 0),
 	}
 }
 
@@ -63,6 +71,10 @@ func (r *registryImpl) GetAvailableTools() []schema.ToolDefinition {
 	return defs
 }
 
+func (r *registryImpl) Use(mv MiddlewareFunc) {
+	r.middlewares = append(r.middlewares, mv)
+}
+
 func (r *registryImpl) Execute(ctx context.Context, call schema.ToolCall) schema.ToolResult {
 	// 1. 路由查找：如果在注册表中找不到该工具，这是模型产生了幻觉，直接向模型抛出错误
 	tool, exists := r.tools[call.Name]
@@ -75,10 +87,22 @@ func (r *registryImpl) Execute(ctx context.Context, call schema.ToolCall) schema
 		}
 	}
 
-	// 2. 执行工具逻辑：将原始的 JSON 字节流直接丢给具体工具
+	// 2. 【核心防御】在执行底层逻辑前，依次运行所有的 Middleware
+	for _, mv := range r.middlewares {
+		allowed, reason := mv(ctx, call)
+		if !allowed {
+			log.Printf("[Registry] ⚠️ 工具 %s 被 Middleware 拦截: %s\n", call.Name, reason)
+			return schema.ToolResult{
+				ToolCallID: call.ID,
+				Output:     fmt.Sprintf("执行被系统拦截。原因: %s", reason),
+				IsError:    true, // 必须返回 Error，强制大模型阅读拒绝理由
+			}
+		}
+	}
+	// 3. 执行工具逻辑：将原始的 JSON 字节流直接丢给具体工具
 	output, err := tool.Execute(ctx, call.Arguments)
 
-	// 3. 封装结果：将执行结果或底层物理错误封装后返回给 Main Loop
+	// 4. 封装结果：将执行结果或底层物理错误封装后返回给 Main Loop
 	if err != nil {
 		errMsg := fmt.Sprintf("Error executing %s: %v", call.Name, err)
 		return schema.ToolResult{
