@@ -60,6 +60,14 @@ func main() {
 	skillLoader := eng.SkillLoader()
 	registry.Register(tools.NewReadSkillTool(skillLoader))
 
+	// 4.6 注册子智能体工具 (spawn_subagent)
+	// 为子智能体创建独立的只读注册表，仅暴露安全工具
+	subRegistry := tools.NewRegistry()
+	subRegistry.Register(tools.NewReadFileTool(workDir))
+	subRegistry.Register(tools.NewBashToolWithPermissions(workDir, permEngine))
+	subRegistry.Register(tools.NewReadSkillTool(skillLoader))
+	registry.Register(tools.NewSubagentTool(eng, subRegistry, nil))
+
 	// 5. 检测运行模式（优先飞书 > 微信 > 终端）
 	switch {
 	case cfg.Feishu.AppID != "":

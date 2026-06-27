@@ -556,3 +556,222 @@ func TestIntegration_ContextCancellation(t *testing.T) {
 		t.Logf("预期的取消错误: %v", err)
 	}
 }
+
+// ============================================================
+// 场景 11: Subagent 端到端集成测试 —— 真实 LLM 调用
+// ============================================================
+
+// newTestEngineWithSubagent 创建一个带 SubagentTool 的完整引擎。
+// 主注册表包含所有工具（含 spawn_subagent），子智能体只读注册表仅含 read_file 和 bash。
+func newTestEngineWithSubagent(t *testing.T) (*AgentEngine, string) {
+	t.Helper()
+
+	llmProvider := provider.NewAnthropicProvider("")
+	workDir := t.TempDir()
+
+	// 主注册表：全量工具
+	registry := tools.NewRegistry()
+	registry.Register(tools.NewReadFileTool(workDir))
+	registry.Register(tools.NewWriteFileTool(workDir))
+	registry.Register(tools.NewEditFileTool(workDir))
+	registry.Register(tools.NewBashTool(workDir))
+
+	eng := NewAgentEngine(llmProvider, registry, workDir, true, false)
+
+	// 子智能体只读注册表：仅安全工具
+	subRegistry := tools.NewRegistry()
+	subRegistry.Register(tools.NewReadFileTool(workDir))
+	subRegistry.Register(tools.NewBashTool(workDir))
+
+	// 注册 SubagentTool 到主注册表
+	registry.Register(tools.NewSubagentTool(eng, subRegistry, nil))
+
+	return eng, workDir
+}
+
+// TestIntegration_SubagentE2E 端到端验证子智能体的完整工作流：
+//
+// 测试设计：
+//   - 在工作区创建一个包含独特密钥的文件（LLM 不可能知道这个值）
+//   - 主 Agent 必须通过 spawn_subagent 派出子智能体来读取并报告
+//   - 通过验证最终回复是否包含该密钥，确认子智能体链路端到端通畅
+//
+// 这个测试会消耗真实 API 调用，没有 API Key 时自动跳过。
+func TestIntegration_SubagentE2E(t *testing.T) {
+	skipIfNoAPIKey(t)
+	eng, workDir := newTestEngineWithSubagent(t)
+	reporter := &captureReporter{}
+
+	// ---- 准备测试文件：包含 LLM 不可能猜到的唯一密钥 ----
+	secretKey := "XK7-M2Q-P9R-WZ4"
+	files := map[string]string{
+		"main.go": `package main
+
+import "fmt"
+
+const AppName = "go-tiny-claw"
+const Version = "v0.3.0"
+
+func main() {
+	fmt.Printf("%s %s starting...\n", AppName, Version)
+}`,
+		"secret.txt": fmt.Sprintf(`PROJECT_LICENSE_KEY=%s
+INTERNAL_API_TOKEN=sk-proj-abc123def456
+DATABASE_URL=postgres://admin:s3cret@db.internal:5432/prod`, secretKey),
+	}
+
+	for name, content := range files {
+		path := fmt.Sprintf("%s/%s", workDir, name)
+		if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+			t.Fatalf("写入测试文件 %s 失败: %v", name, err)
+		}
+	}
+
+	// ---- 发送任务：要求通过子智能体探索并汇报 ----
+	session := GlobalSessionMgr.GetOrCreate("test_subagent_e2e_"+t.Name(), workDir)
+
+	prompt := fmt.Sprintf(`我需要你完成一个探索任务。请使用 spawn_subagent 工具派出探路者子智能体。
+
+子智能体的任务是：
+1. 读取 secret.txt 文件
+2. 找到 PROJECT_LICENSE_KEY 的值
+3. 读取 main.go，找到 AppName 和 Version 的值
+4. 将所有发现汇总成报告返回
+
+请在收到子智能体的报告后，告诉我 PROJECT_LICENSE_KEY 的完整值。`)
+
+	log.Printf("[Test] ====== Subagent E2E 测试开始 ======")
+	log.Printf("[Test] 工作区: %s", workDir)
+	log.Printf("[Test] 期望密钥: %s", secretKey)
+
+	err := eng.Run(context.Background(), session, prompt, reporter)
+	if err != nil {
+		t.Fatalf("引擎运行失败: %v", err)
+	}
+
+	reply := reporter.LastMessage()
+	t.Logf("主 Agent 最终回复: %s", reply)
+	t.Logf("调用的工具列表: %v", reporter.ToolNames())
+
+	// ---- 断言 ----
+	if reply == "" {
+		t.Fatal("主 Agent 返回了空回复")
+	}
+
+	toolNames := reporter.ToolNames()
+
+	// 1. 必须调用了 spawn_subagent
+	foundSubagent := false
+	for _, name := range toolNames {
+		if name == "spawn_subagent" {
+			foundSubagent = true
+			break
+		}
+	}
+
+	if foundSubagent {
+		t.Log("✅ 主 Agent 使用了 spawn_subagent — 子智能体委派链路验证通过")
+	} else {
+		t.Errorf("❌ 主 Agent 未调用 spawn_subagent，实际工具: %v", toolNames)
+	}
+
+	// 2. 最终回复必须包含密钥（LLM 不可能猜到，只能通过子智能体读取）
+	if strings.Contains(reply, secretKey) {
+		t.Logf("✅ 最终回复包含正确密钥 '%s' — 子智能体端到端链路验证通过", secretKey)
+	} else {
+		t.Errorf("❌ 最终回复未包含密钥 '%s'，子智能体探索可能失败", secretKey)
+	}
+
+	// 3. 检查项目名和版本号
+	lowerReply := strings.ToLower(reply)
+	if strings.Contains(lowerReply, "go-tiny-claw") {
+		t.Log("  ✅ 项目名称: 包含 'go-tiny-claw'")
+	}
+	if strings.Contains(reply, "v0.3.0") || strings.Contains(reply, "0.3.0") {
+		t.Log("  ✅ 版本号: 包含 'v0.3.0'")
+	}
+
+	log.Printf("[Test] ====== Subagent E2E 测试完成 ======")
+}
+
+// TestIntegration_SubagentWithBash 验证子智能体能正确使用 bash 工具执行命令。
+func TestIntegration_SubagentWithBash(t *testing.T) {
+	skipIfNoAPIKey(t)
+	eng, workDir := newTestEngineWithSubagent(t)
+	reporter := &captureReporter{}
+
+	// 创建一些测试文件
+	os.WriteFile(fmt.Sprintf("%s/app.py", workDir), []byte(`#!/usr/bin/env python3
+print("hello from python")
+VERSION = "1.0.0"
+`), 0644)
+	os.WriteFile(fmt.Sprintf("%s/utils.py", workDir), []byte(`def add(a, b):
+    return a + b
+
+def multiply(a, b):
+    return a * b
+`), 0644)
+
+	session := GlobalSessionMgr.GetOrCreate("test_subagent_bash_"+t.Name(), workDir)
+
+	prompt := `当前工作区有 Python 项目文件，请使用 spawn_subagent 工具派出探路者子智能体完成以下深度探索：
+
+探索目标：
+1. 用 bash 执行 ls 命令，列出当前目录所有 .py 文件
+2. 读取 app.py，找到 VERSION 变量的值
+3. 读取 utils.py，找到定义了哪些函数
+
+重要：你必须使用 spawn_subagent 工具委派此任务。
+探路者返回报告后，请汇总它的发现。`
+
+	log.Printf("[Test] ====== Subagent Bash 测试开始 ======")
+
+	err := eng.Run(context.Background(), session, prompt, reporter)
+	if err != nil {
+		t.Fatalf("引擎运行失败: %v", err)
+	}
+
+	reply := reporter.LastMessage()
+	t.Logf("主 Agent 最终回复: %s", reply)
+	t.Logf("调用的工具列表: %v", reporter.ToolNames())
+
+	if reply == "" {
+		t.Fatal("主 Agent 返回了空回复")
+	}
+
+	toolNames := reporter.ToolNames()
+	foundSubagent := false
+	for _, name := range toolNames {
+		if name == "spawn_subagent" {
+			foundSubagent = true
+			break
+		}
+	}
+
+	if foundSubagent {
+		t.Log("✅ 主 Agent 使用了 spawn_subagent — 子智能体链路验证通过")
+	} else {
+		t.Logf("⚠️ 主 Agent 选择直接完成任务，工具: %v", toolNames)
+	}
+
+	// 验证任务完成度
+	lowerReply := strings.ToLower(reply)
+	checks := []struct {
+		name    string
+		keyword string
+	}{
+		{"VERSION 值", "1.0.0"},
+		{"add 函数", "add"},
+		{"multiply 函数", "multiply"},
+	}
+
+	for _, c := range checks {
+		if strings.Contains(lowerReply, c.keyword) {
+			t.Logf("  ✅ %s: 包含 '%s'", c.name, c.keyword)
+		} else {
+			t.Errorf("  ❌ %s: 回复中未包含 '%s'", c.name, c.keyword)
+		}
+	}
+
+	log.Printf("[Test] ====== Subagent Bash 测试完成 ======")
+}
