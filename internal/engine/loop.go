@@ -35,7 +35,8 @@ type AgentEngine struct {
 	//
 	// 锁粒度控制在工具批次级而非整个 Run() 生命周期，避免 Agent 在纯 LLM 推理
 	// 阶段白白阻塞其他 Agent 的读操作。
-	wsRWMu sync.RWMutex
+	wsRWMu    sync.RWMutex
+	compactor *ctxpkg.Compactor // 压缩器实例，防止大模型上下文 OOM
 }
 
 func NewAgentEngine(p provider.LLMProvider, r tools.Registry, workDir string, enableThinking bool) *AgentEngine {
@@ -47,6 +48,8 @@ func NewAgentEngine(p provider.LLMProvider, r tools.Registry, workDir string, en
 		EnableThinking: enableThinking,
 		taskManager:    tools.GetTaskManager(),
 		trackedTaskIDs: make(map[string]struct{}),
+		// 水位线阈值 3000 字符，保护最近 6 条消息
+		compactor: ctxpkg.NewCompactor(3000, 6),
 	}
 }
 
@@ -89,7 +92,11 @@ func (e *AgentEngine) Run(ctx context.Context, session *Session, userPrompt stri
 
 		contextHistory = append(contextHistory, workingMemory...)
 
-		// 2. ================= Phase 1: Thinking =================
+		// 2. 【核心注入点】: 在向 Provider 发起推理前，过一遍内存压缩器！
+		// 无论你带出了多少上下文，如果字符总数超标，早期日志将被掩码化，超大日志将被掐头去尾
+		contextHistory = e.compactor.Compact(contextHistory)
+
+		// 3. ================= Phase 1: Thinking =================
 
 		if e.EnableThinking {
 			if reporter != nil {
@@ -107,7 +114,7 @@ func (e *AgentEngine) Run(ctx context.Context, session *Session, userPrompt stri
 			}
 
 		}
-		// 3. ================= Phase 2: Action =================
+		// 4. ================= Phase 2: Action =================
 		actionResp, err := e.provider.Generate(ctx, contextHistory, availableTools)
 		if err != nil {
 			return fmt.Errorf("Action 阶段生成失败: %w", err)
@@ -126,7 +133,7 @@ func (e *AgentEngine) Run(ctx context.Context, session *Session, userPrompt stri
 			break
 		}
 
-		// 4. ================= 并发执行底层工具 =================
+		// 5. ================= 并发执行底层工具 =================
 		e.executeToolsInParallel(ctx, actionResp.ToolCalls, &contextHistory, reporter)
 
 		// 将本轮工具执行结果（Observation）持久化到 Session 中
