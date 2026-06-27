@@ -205,3 +205,188 @@ func TestDeadlock_Detection(t *testing.T) {
 
 	t.Logf("✅ 死循环探测机制验证通过：第 %d 次失败后成功注入打断提醒", failureBeforeReminder)
 }
+
+// ═══════════════════════════════════════════════════════════════
+// TestFingerprint_Normalization 验证参数规范化能否"看穿"大模型的小聪明
+//
+// 场景：大模型用三种微小差异重试同一个语义操作
+//   - 尾部空格:   "/tmp/a.txt"  vs "/tmp/a.txt "
+//   - 多余斜杠:   "/tmp//a.txt" vs "/tmp/a.txt"
+//   - 冗余遍历:   "/tmp/../tmp/a.txt" vs "/tmp/a.txt"
+//
+// 如果规范化生效，这三次调用应生成相同指纹，第 3 次就触发打断。
+// ═══════════════════════════════════════════════════════════════
+
+func TestFingerprint_Normalization(t *testing.T) {
+	tests := []struct {
+		name     string
+		toolName string
+		args1    string
+		args2    string
+	}{
+		{
+			name:     "尾部空格差异",
+			toolName: "read_file",
+			args1:    `{"path": "/tmp/a.txt"}`,
+			args2:    `{"path": "/tmp/a.txt "}`,
+		},
+		{
+			name:     "多余斜杠差异",
+			toolName: "read_file",
+			args1:    `{"path": "/tmp/a.txt"}`,
+			args2:    `{"path": "/tmp//a.txt"}`,
+		},
+		{
+			name:     "相对路径 vs 绝对路径",
+			toolName: "read_file",
+			args1:    `{"path": "/tmp/a.txt"}`,
+			args2:    `{"path": "/foo/../tmp/a.txt"}`,
+		},
+		{
+			name:     "数值类型差异 (1 vs 1.0)",
+			toolName: "some_tool",
+			args1:    `{"count": 1}`,
+			args2:    `{"count": 1.0}`,
+		},
+		{
+			name:     "bash 空格差异",
+			toolName: "bash",
+			args1:    `{"command": "ls -la"}`,
+			args2:    `{"command": "ls  -la  "}`,
+		},
+		{
+			name:     "bash 重定向格式差异",
+			toolName: "bash",
+			args1:    `{"command": "ls -la > /dev/null"}`,
+			args2:    `{"command": "ls -la >/dev/null"}`,
+		},
+		{
+			name:     "bash 环境变量前缀差异",
+			toolName: "bash",
+			args1:    `{"command": "ls -la"}`,
+			args2:    `{"command": "TERM=xterm ls -la"}`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fp1 := generateFingerprint(tt.toolName, []byte(tt.args1))
+			fp2 := generateFingerprint(tt.toolName, []byte(tt.args2))
+
+			if fp1 != fp2 {
+				t.Errorf("❌ 相同语义的参数生成了不同指纹！\n"+
+					"  args1: %s → %s\n"+
+					"  args2: %s → %s",
+					tt.args1, fp1[:8], tt.args2, fp2[:8])
+			} else {
+				t.Logf("✅ %s: 两种参数形式 → 相同指纹 %s", tt.name, fp1[:8])
+			}
+		})
+	}
+}
+
+// ═══════════════════════════════════════════════════════════════
+// TestFingerprint_Sensitivity 验证规范化不会"误杀"真正不同的参数
+//
+// 确保：不同语义的参数仍然生成不同指纹
+// ═══════════════════════════════════════════════════════════════
+
+func TestFingerprint_Sensitivity(t *testing.T) {
+	tests := []struct {
+		name     string
+		toolName string
+		args1    string
+		args2    string
+	}{
+		{
+			name:     "不同文件路径",
+			toolName: "read_file",
+			args1:    `{"path": "/tmp/a.txt"}`,
+			args2:    `{"path": "/tmp/b.txt"}`,
+		},
+		{
+			name:     "不同 bash 命令",
+			toolName: "bash",
+			args1:    `{"command": "ls -la"}`,
+			args2:    `{"command": "cat /tmp/a.txt"}`,
+		},
+		{
+			name:     "不同工具同参数",
+			toolName: "read_file",
+			args1:    `{"path": "/tmp/a.txt"}`,
+			args2:    `{"path": "/tmp/a.txt"}`, // 这个应该相同，用于对比
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fp1 := generateFingerprint(tt.toolName, []byte(tt.args1))
+			fp2 := generateFingerprint(tt.toolName, []byte(tt.args2))
+
+			if tt.name == "不同工具同参数" {
+				// 这个用例应该相同
+				if fp1 != fp2 {
+					t.Errorf("❌ 相同参数却生成了不同指纹")
+				}
+			} else {
+				if fp1 == fp2 {
+					t.Errorf("❌ 不同语义的参数却生成了相同指纹！\n"+
+						"  args1: %s\n"+
+						"  args2: %s", tt.args1, tt.args2)
+				} else {
+					t.Logf("✅ %s: 不同参数 → 不同指纹", tt.name)
+				}
+			}
+		})
+	}
+}
+
+// ═══════════════════════════════════════════════════════════════
+// TestDeadlock_NormalizedRetry 验证"小聪明重试"场景下的死循环检测
+//
+// 大模型用三种微小差异重试同一个失败操作：
+//   第 1 次: read_file{"path": "/tmp/a.txt"}
+//   第 2 次: read_file{"path": "/tmp/a.txt "}  （尾部空格）
+//   第 3 次: read_file{"path": "/tmp/../tmp/a.txt"}（冗余遍历）
+//
+// 规范化生效 → 第 3 次触发打断（而非等到第 3 次才开始计数）
+// ═══════════════════════════════════════════════════════════════
+
+func TestDeadlock_NormalizedRetry(t *testing.T) {
+	injector := NewReminderInjector()
+
+	// 模拟大模型的三种"小聪明"重试
+	variations := []struct {
+		toolName string
+		args     string
+	}{
+		{"read_file", `{"path": "/tmp/a.txt"}`},
+		{"read_file", `{"path": "/tmp/a.txt "}`},       // 尾部空格
+		{"read_file", `{"path": "/tmp/../tmp/a.txt"}`}, // 冗余父目录遍历
+	}
+
+	for i, v := range variations {
+		call := schema.ToolCall{
+			ID:        fmt.Sprintf("call_%d", i+1),
+			Name:      v.toolName,
+			Arguments: json.RawMessage(v.args),
+		}
+		result := schema.ToolResult{IsError: true, Output: "file not found"}
+
+		reminder := injector.CheckAndInject(call, result)
+
+		if i < 2 {
+			if reminder != nil {
+				t.Errorf("❌ 第 %d 次就触发了打断（预期第 3 次才触发）", i+1)
+			} else {
+				t.Logf("  第 %d 次失败 (args=%s) → 未触发（正常）", i+1, v.args)
+			}
+		} else {
+			if reminder == nil {
+				t.Error("❌ 第 3 次微小差异重试未触发打断！规范化可能未生效。")
+			} else {
+				t.Logf("✅ 第 3 次微小差异重试 → 成功触发打断！")
+			}
+		}
+	}
+}
