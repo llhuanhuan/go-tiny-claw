@@ -37,11 +37,12 @@ import (
 
 // FeishuBot 封装飞书机器人的长连接配置与核心业务流。
 type FeishuBot struct {
-	client    *lark.Client   // API 客户端（用于发送消息）
+	client    *lark.Client // API 客户端（用于发送消息）
 	appID     string
 	appSecret string
 	engine    *engine.AgentEngine
-	wsClient  *larkws.Client // WebSocket 长连接客户端
+	wsClient  *larkws.Client  // WebSocket 长连接客户端
+	r         *FeishuReporter // 新增实现Reporter接口的FeishuReporter实例
 }
 
 // NewFeishuBot 创建一个基于长连接的飞书 Bot。
@@ -120,6 +121,23 @@ func (b *FeishuBot) onMessageReceived(ctx context.Context, event *larkim.P2Messa
 
 	chatID := *event.Event.Message.ChatId
 	log.Printf("[Feishu] 收到会话 %s 消息: %s", chatID, contentStr)
+
+	// 【审批拦截】：检查是否为人工审批口令
+	if strings.HasPrefix(contentStr, "approve ") {
+		taskID := strings.TrimPrefix(contentStr, "approve ")
+		taskID = strings.TrimSpace(taskID)
+		GlobalApprovalMgr.ResolveApproval(taskID, true, "人类管理员已批准操作")
+		log.Printf("[Feishu] 会话 %s: ✅ 已为任务 %s 发放批准", chatID, taskID)
+		return nil
+	}
+
+	if strings.HasPrefix(contentStr, "reject ") {
+		taskID := strings.TrimPrefix(contentStr, "reject ")
+		taskID = strings.TrimSpace(taskID)
+		GlobalApprovalMgr.ResolveApproval(taskID, false, "人类管理员已拒绝操作")
+		log.Printf("[Feishu] 会话 %s: ❌ 已为任务 %s 发放拒绝", chatID, taskID)
+		return nil
+	}
 
 	// 异步启动 Agent，不阻塞事件回调
 	go b.runAgent(chatID, contentStr)
@@ -211,7 +229,9 @@ func extractTextContent(event *larkim.P2MessageReceiveV1) string {
 	}
 	raw := *event.Event.Message.Content
 
-	var content struct{ Text string `json:"text"` }
+	var content struct {
+		Text string `json:"text"`
+	}
 	if json.Unmarshal([]byte(raw), &content) == nil && content.Text != "" {
 		return content.Text
 	}

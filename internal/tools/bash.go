@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os/exec"
+	"strings"
 	"time"
 
 	"github.com/lhuan/go-tiny-claw/internal/schema"
@@ -16,6 +17,30 @@ import (
 //   - 同步模式 (默认): 阻塞等待,30s 超时,适用于 ls / go test 等短命令。
 //   - 后台模式 (run_in_background: true): 立即返回 Task ID,进程持续运行,
 //     适用于 npm run dev / python server.py 等守护进程。
+// 危险命令模式列表
+var dangerousPatterns = []string{
+	"rm -rf",
+	"rm -fr",
+	"rmdir /s",
+	"rmdir /q",
+	"format ",
+	"mkfs",
+	"dd if=",
+	"chmod -R 777",
+	"chown -R",
+}
+
+// isDangerousCommand 检查命令是否包含危险模式
+func isDangerousCommand(cmd string) bool {
+	lowerCmd := strings.ToLower(cmd)
+	for _, pattern := range dangerousPatterns {
+		if strings.Contains(lowerCmd, pattern) {
+			return true
+		}
+	}
+	return false
+}
+
 type BashTool struct {
 	workDir string // 工作区约束
 }
@@ -62,6 +87,13 @@ func (t *BashTool) Execute(ctx context.Context, args json.RawMessage) (string, e
 	var input bashArgs
 	if err := json.Unmarshal(args, &input); err != nil {
 		return "", NewToolError(ErrParamParseFailed, "参数解析失败", err)
+	}
+
+	// 【安全检查】：拦截危险命令
+	if isDangerousCommand(input.Command) {
+		return "", fmt.Errorf("⚠️ 危险命令被拦截: %s\n"+
+			"原因: 该命令可能导致数据丢失或系统损坏。\n"+
+			"如需执行，请使用更安全的替代方案或联系管理员。", input.Command)
 	}
 
 	// ====================================================================
