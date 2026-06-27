@@ -16,6 +16,15 @@ type Message struct {
 	Content    string     `json:"content"`              // 存放纯文本内容
 	ToolCalls  []ToolCall `json:"tool_calls,omitempty"` // 如果模型决定调用工具，此字段将被填充 (支持并行调用多个工具)
 	ToolCallID string     `json:"tool_call_id,omitempty"`
+	Usage      *TokenUsage `json:"usage,omitempty"` // API 返回的 Token 消耗（仅 assistant 消息携带）
+}
+
+// TokenUsage 记录单次 API 调用的 Token 消耗，用于自适应压缩决策。
+// 各大模型 API（OpenAI / Anthropic / 智谱 / DeepSeek）均在 Response 中返回此数据。
+type TokenUsage struct {
+	PromptTokens     int `json:"prompt_tokens"`     // 输入 Token 数（系统提示 + 历史消息 + 工具定义）
+	CompletionTokens int `json:"completion_tokens"` // 输出 Token 数（模型生成的内容 + 工具调用参数）
+	TotalTokens      int `json:"total_tokens"`      // 总 Token 数
 }
 
 // ToolCall 代表模型请求调用某个具体的工具

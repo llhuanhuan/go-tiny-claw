@@ -159,6 +159,17 @@ func (p *OpenAIProvider) StreamGenerate(
 			chunk := stream.Current()
 
 			if len(chunk.Choices) == 0 {
+				// Usage 数据在流的最后一个 chunk 中（可能没有 Choices）
+				if chunk.Usage.PromptTokens > 0 {
+					ch <- StreamEvent{
+						Type: StreamEventUsage,
+						Usage: &schema.TokenUsage{
+							PromptTokens:     int(chunk.Usage.PromptTokens),
+							CompletionTokens: int(chunk.Usage.CompletionTokens),
+							TotalTokens:      int(chunk.Usage.TotalTokens),
+						},
+					}
+				}
 				continue
 			}
 

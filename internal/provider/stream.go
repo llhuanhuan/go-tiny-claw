@@ -1,5 +1,7 @@
 package provider
 
+import "github.com/lhuan/go-tiny-claw/internal/schema"
+
 // StreamEvent 事件生命周期
 //
 // 一次完整的流式推理按时间线投递以下事件序列：
@@ -56,6 +58,10 @@ const (
 
 	// StreamEventError 流中发生不可恢复的错误
 	StreamEventError
+
+	// StreamEventUsage 携带本次 API 调用的 Token 消耗统计
+	// 用于自适应压缩决策：Compactor 根据真实 PromptTokens 与模型窗口的比值调整压缩策略
+	StreamEventUsage
 )
 
 // StreamEvent 是流式响应的最小传输单元
@@ -84,4 +90,7 @@ type StreamEvent struct {
 
 	// Error 仅在 StreamEventError 类型时有效
 	Error error
+
+	// Usage 仅在 StreamEventUsage 类型时有效，携带本次 API 调用的 Token 消耗
+	Usage *schema.TokenUsage
 }

@@ -13,6 +13,7 @@ type AppConfig struct {
 	Server ServerConfig `yaml:"server"`
 	Feishu FeishuConfig `yaml:"feishu"`
 	Wechat WechatConfig `yaml:"wechat"`
+	Model  ModelConfig  `yaml:"model"`
 }
 
 // ServerConfig 定义了服务启动的核心参数。
@@ -34,12 +35,20 @@ type WechatConfig struct {
 	EncodingAESKey string `yaml:"encoding_aes_key"`
 }
 
+// ModelConfig 定义模型相关的配置，用于自适应压缩决策。
+type ModelConfig struct {
+	MaxContextWindow int `yaml:"max_context_window"` // 模型上下文窗口 Token 数，默认 200000
+}
+
 // DefaultConfig 返回一套开箱即用的默认配置。
 func DefaultConfig() *AppConfig {
 	return &AppConfig{
 		Server: ServerConfig{
 			Port: 48080,
 			Mode: "debug",
+		},
+		Model: ModelConfig{
+			MaxContextWindow: 200000, // 默认 200k Token（适配 Claude Sonnet）
 		},
 	}
 }
@@ -97,6 +106,14 @@ func (c *AppConfig) applyEnvOverrides() {
 		var port int
 		if _, err := fmt.Sscanf(v, "%d", &port); err == nil && port > 0 {
 			c.Server.Port = port
+		}
+	}
+
+	// 模型上下文窗口
+	if v := os.Getenv("MAX_CONTEXT_WINDOW"); v != "" {
+		var window int
+		if _, err := fmt.Sscanf(v, "%d", &window); err == nil && window > 0 {
+			c.Model.MaxContextWindow = window
 		}
 	}
 }

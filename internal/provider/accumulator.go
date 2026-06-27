@@ -18,6 +18,7 @@ type StreamAccumulator struct {
 	content  strings.Builder
 	thinking strings.Builder
 	toolMap  map[int]*toolSlot
+	usage    *schema.TokenUsage // API 返回的 Token 消耗（由 StreamEventUsage 事件写入）
 }
 
 type toolSlot struct {
@@ -52,6 +53,9 @@ func (a *StreamAccumulator) Ingest(ev StreamEvent) {
 		if slot, ok := a.toolMap[ev.ToolCallIndex]; ok {
 			slot.ArgsBuf.WriteString(ev.Delta)
 		}
+
+	case StreamEventUsage:
+		a.usage = ev.Usage
 	}
 }
 
@@ -77,6 +81,7 @@ func (a *StreamAccumulator) Finalize() *schema.Message {
 	msg := &schema.Message{
 		Role:    schema.RoleAssistant,
 		Content: a.content.String(),
+		Usage:   a.usage, // 携带 API 返回的 Token 消耗
 	}
 
 	if len(a.toolMap) == 0 {

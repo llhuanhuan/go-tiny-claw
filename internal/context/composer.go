@@ -10,85 +10,213 @@ import (
 	"github.com/lhuan/go-tiny-claw/internal/schema"
 )
 
-// Compactor 负责监控和压缩上下文内存，防止大模型发生 OOM
+// Compactor 负责监控和压缩上下文内存，防止大模型发生 OOM。
+//
+// 自适应压缩机制 (Adaptive Compression)：
+//   - 当 Provider 返回真实的 Token 消耗时，Compactor 根据 利用率 = PromptTokens / MaxWindowTokens
+//     动态调整压缩策略的激进程度。
+//   - 当没有真实 Token 数据时（首次调用或 Provider 不支持），回退到字符估算模式。
+//
+// 压缩级别梯度：
+//
+//	利用率 < 50%  → 不压缩
+//	利用率 50-70% → 温和压缩（仅掩码远期历史）
+//	利用率 70-85% → 标准压缩（远期掩码 + 近期掐头去尾 500+500）
+//	利用率 85-95% → 激进压缩（远期掩码 + 近期掐头去尾 200+200）
+//	利用率 > 95%  → 紧急压缩（全部掩码，仅保留最近 2 条）
 type Compactor struct {
-	MaxChars       int // 触发压缩的最大字符数阈值 (水位线，可参考使用的大模型的token窗口大小)
-	RetainLastMsgs int // Working Memory 保护区：最近的 N 条消息
+	MaxWindowTokens int // 模型的最大上下文窗口 Token 数（从配置读取，默认 200000）
+	RetainLastMsgs  int // Working Memory 保护区：最近的 N 条消息
+
+	// 自适应状态（由 UpdateUsage 更新）
+	lastPromptTokens int  // 上次 API 返回的真实 PromptTokens
+	useTokenMode     bool // 是否已收到过真实 Token 数据
 }
 
-func NewCompactor(maxChars int, retainLastMsgs int) *Compactor {
+// CompressionLevel 压缩级别
+type CompressionLevel int
+
+const (
+	LevelNone       CompressionLevel = iota // 不压缩
+	LevelGentle                             // 温和：仅掩码远期
+	LevelStandard                           // 标准：远期掩码 + 近期 500+500
+	LevelAggressive                         // 激进：远期掩码 + 近期 200+200
+	LevelEmergency                          // 紧急：全部掩码，仅保留最近 2 条
+)
+
+// NewCompactor 创建一个新的自适应压缩器。
+//   - maxWindowTokens: 模型上下文窗口大小（Token 数）
+//   - retainLastMsgs:  保护区消息数
+func NewCompactor(maxWindowTokens int, retainLastMsgs int) *Compactor {
+	if maxWindowTokens <= 0 {
+		maxWindowTokens = 200000 // 默认 200k Token 窗口
+	}
 	return &Compactor{
-		MaxChars:       maxChars,
-		RetainLastMsgs: retainLastMsgs,
+		MaxWindowTokens: maxWindowTokens,
+		RetainLastMsgs:  retainLastMsgs,
 	}
 }
 
-// Compact 接收准备发送给大模型的消息数组。
-// 如果总长度超标，对远期历史区进行全量掩码 (Masking)，对短期保护区进行超长局部截断 (Truncation)。
+// UpdateUsage 由 Engine 在每次 API 响应后调用，喂入真实 Token 消耗数据。
+// 这是自适应压缩的核心输入——Compactor 根据 PromptTokens 与模型窗口的比值决定压缩策略。
+func (c *Compactor) UpdateUsage(promptTokens int) {
+	if promptTokens > 0 {
+		c.lastPromptTokens = promptTokens
+		c.useTokenMode = true
+	}
+}
+
+// evaluateLevel 根据当前状态评估压缩级别
+func (c *Compactor) evaluateLevel(estimatedChars int) CompressionLevel {
+	if c.useTokenMode && c.MaxWindowTokens > 0 {
+		// Token 模式：基于真实 Token 利用率
+		utilization := float64(c.lastPromptTokens) / float64(c.MaxWindowTokens)
+
+		switch {
+		case utilization < 0.50:
+			return LevelNone
+		case utilization < 0.70:
+			return LevelGentle
+		case utilization < 0.85:
+			return LevelStandard
+		case utilization < 0.95:
+			return LevelAggressive
+		default:
+			return LevelEmergency
+		}
+	}
+
+	// 降级模式：基于字符估算（经验值：1 Token ≈ 3 中文字 ≈ 4 英文字母）
+	// 保守取 3 字符/Token 作为中文为主的场景的估算
+	estimatedTokens := estimatedChars / 3
+	if estimatedTokens < c.MaxWindowTokens/2 {
+		return LevelNone
+	}
+	return LevelStandard
+}
+
+// levelName 返回压缩级别的可读名称
+func levelName(level CompressionLevel) string {
+	switch level {
+	case LevelNone:
+		return "不压缩"
+	case LevelGentle:
+		return "温和"
+	case LevelStandard:
+		return "标准"
+	case LevelAggressive:
+		return "激进"
+	case LevelEmergency:
+		return "紧急"
+	default:
+		return "未知"
+	}
+}
+
+// Compact 接收准备发送给大模型的消息数组，根据自适应策略进行压缩。
 func (c *Compactor) Compact(msgs []schema.Message) []schema.Message {
 	currentLength := c.estimateLength(msgs)
+	level := c.evaluateLevel(currentLength)
 
-	// 如果没有超过水位线，直接返回原数组 (大多数情况下的正常路径)
-	if currentLength < c.MaxChars {
+	if level == LevelNone {
 		return msgs
 	}
 
-	log.Printf("[Compactor] ⚠️ 内存告警：当前上下文长度 (%d 字符) 超过阈值 (%d)，触发压缩清理...\n", currentLength, c.MaxChars)
+	// 根据压缩级别确定参数
+	var farThreshold int   // 远期消息掩码阈值（字符数）
+	var nearHeadTail int   // 近期消息掐头去尾保留量（每端字符数）
+	var emergencyRetain int // 紧急模式保留的消息数
+
+	switch level {
+	case LevelGentle:
+		farThreshold = 200
+		nearHeadTail = 0 // 不截断近期
+	case LevelStandard:
+		farThreshold = 200
+		nearHeadTail = 500
+	case LevelAggressive:
+		farThreshold = 100
+		nearHeadTail = 200
+	case LevelEmergency:
+		farThreshold = 0   // 全部掩码
+		nearHeadTail = 100 // 仅保留极少量
+		emergencyRetain = 2
+	}
+
+	log.Printf("[Compactor] ⚠️ [%s压缩] 当前上下文 %d 字符, Token利用率: %s, 触发压缩清理...\n",
+		levelName(level), currentLength, c.utilizationString())
 
 	var compacted []schema.Message
 	msgCount := len(msgs)
 
-	// 计算受保护的 Working Memory 起始索引
-	protectStartIndex := msgCount - c.RetainLastMsgs
+	// 紧急模式：缩减保护区
+	retainCount := c.RetainLastMsgs
+	if level == LevelEmergency {
+		retainCount = emergencyRetain
+	}
+
+	protectStartIndex := msgCount - retainCount
 	if protectStartIndex < 0 {
 		protectStartIndex = 0
 	}
 
 	for i, msg := range msgs {
-		// 1. 系统提示词 (System Prompt) 绝对不能动，直接保留
+		// 系统提示词绝对不动
 		if msg.Role == schema.RoleSystem {
 			compacted = append(compacted, msg)
 			continue
 		}
 
-		// 我们必须拷贝一份新消息，因为在并发环境中直接修改原引用可能导致底层数据结构被污染
 		newMsg := msg
-
 		isInWorkingMemory := i >= protectStartIndex
 
-		// 【核心驾驭逻辑】: 双重降级防线
 		if msg.Role == schema.RoleUser && msg.ToolCallID != "" {
-			// 对于工具的返回结果 (Observation/ToolResult)
+			// 工具返回结果 (ToolResult/Observation)
 			if !isInWorkingMemory {
-				// 【第一道防线：远期历史】如果是早期对话，执行无情替换 (Full Masking)
-				if len(msg.Content) > 200 {
+				// 远期历史：全量掩码
+				if farThreshold == 0 || len(msg.Content) > farThreshold {
 					newMsg.Content = fmt.Sprintf("...[为了节省内存，早期的工具输出已被系统强制清理。原始长度: %d 字节]...", len(msg.Content))
 				}
 			} else {
-				// 【第二道防线：短期记忆】即使处于近期保护区，只要单条内容过大，也必须截断防 OOM (Head-Tail Truncation)
-				// 我们保留前 500 字符和后 500 字符（掐头去尾法，大模型通常只需要看开头报错和结尾总结）
-				const maxKeep = 1000
-				if len(msg.Content) > maxKeep {
-					head := msg.Content[:500]
-					tail := msg.Content[len(msg.Content)-500:]
-					newMsg.Content = fmt.Sprintf("%s\n\n...[内容过长，中间 %d 字节已被系统截断]...\n\n%s", head, len(msg.Content)-maxKeep, tail)
+				// 近期保护区：掐头去尾
+				if nearHeadTail > 0 {
+					maxKeep := nearHeadTail * 2
+					if len(msg.Content) > maxKeep {
+						head := msg.Content[:nearHeadTail]
+						tail := msg.Content[len(msg.Content)-nearHeadTail:]
+						newMsg.Content = fmt.Sprintf("%s\n\n...[内容过长，中间 %d 字节已被系统截断]...\n\n%s", head, len(msg.Content)-maxKeep, tail)
+					}
 				}
 			}
 		} else if msg.Role == schema.RoleAssistant && msg.Content != "" {
-			// 对于大模型的冗长推理废话 (Thinking Trace)
+			// 模型推理废话
 			if !isInWorkingMemory && len(msg.Content) > 200 {
 				newMsg.Content = "...[早期的推理思考过程已折叠]..."
 			}
 		}
 
-		// 注意：我们绝不会去动 msg.ToolCalls，因为这是模型行动的证据，是维系逻辑链的关键！
+		// 绝不修改 ToolCalls
 		compacted = append(compacted, newMsg)
 	}
 
 	newLength := c.estimateLength(compacted)
-	log.Printf("[Compactor] ✅ 压缩完成。上下文长度从 %d 降至 %d 字符。\n", currentLength, newLength)
+	compressionRatio := float64(0)
+	if currentLength > 0 {
+		compressionRatio = (1 - float64(newLength)/float64(currentLength)) * 100
+	}
+	log.Printf("[Compactor] ✅ [%s压缩] 上下文长度从 %d 降至 %d 字符 (压缩率 %.1f%%)\n",
+		levelName(level), currentLength, newLength, compressionRatio)
 
 	return compacted
+}
+
+// utilizationString 返回当前利用率的可读字符串
+func (c *Compactor) utilizationString() string {
+	if c.useTokenMode && c.MaxWindowTokens > 0 {
+		utilization := float64(c.lastPromptTokens) / float64(c.MaxWindowTokens) * 100
+		return fmt.Sprintf("%.1f%% (%d/%d tokens)", utilization, c.lastPromptTokens, c.MaxWindowTokens)
+	}
+	return "未知(降级字符估算模式)"
 }
 
 // estimateLength 粗略计算当前上下文的总字符长度

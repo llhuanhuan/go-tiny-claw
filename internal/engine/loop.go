@@ -48,9 +48,19 @@ func NewAgentEngine(p provider.LLMProvider, r tools.Registry, workDir string, en
 		EnableThinking: enableThinking,
 		taskManager:    tools.GetTaskManager(),
 		trackedTaskIDs: make(map[string]struct{}),
-		// 水位线阈值 3000 字符，保护最近 6 条消息
-		compactor: ctxpkg.NewCompactor(3000, 6),
+		// 自适应压缩器：默认 200k Token 窗口，保护最近 6 条消息
+		compactor: ctxpkg.NewCompactor(200000, 6),
 	}
+}
+
+// SetMaxContextWindow 设置模型的上下文窗口大小（Token 数），供 Compactor 进行自适应压缩决策。
+// 应在引擎创建后、运行前调用。不同模型的典型值：
+//   - Gemini 3.1 Pro: 1000000
+//   - Claude Sonnet:  200000
+//   - 智谱 GLM-4:     128000
+//   - Llama 本地模型:  8192
+func (e *AgentEngine) SetMaxContextWindow(maxTokens int) {
+	e.compactor.MaxWindowTokens = maxTokens
 }
 
 // SkillLoader 返回引擎内部 Composer 持有的 SkillLoader 引用，
@@ -119,6 +129,14 @@ func (e *AgentEngine) Run(ctx context.Context, session *Session, userPrompt stri
 		if err != nil {
 			return fmt.Errorf("Action 阶段生成失败: %w", err)
 		}
+
+		// 【自适应压缩】从 API 响应中提取真实 Token 消耗，喂给 Compactor 用于下一轮压缩决策
+		if actionResp.Usage != nil && actionResp.Usage.PromptTokens > 0 {
+			e.compactor.UpdateUsage(actionResp.Usage.PromptTokens)
+			log.Printf("[Engine] 📊 Token 消耗: Prompt=%d, Completion=%d, Total=%d",
+				actionResp.Usage.PromptTokens, actionResp.Usage.CompletionTokens, actionResp.Usage.TotalTokens)
+		}
+
 		// 将大模型的行动响应持久化到 Session 中
 		session.Append(*actionResp)
 

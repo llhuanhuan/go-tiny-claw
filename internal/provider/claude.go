@@ -211,6 +211,19 @@ func (p *ClaudeProvider) StreamGenerate(
 
 			switch ev := event.AsAny().(type) {
 
+			case anthropic.MessageStartEvent:
+				// 捕获初始 Usage 数据（InputTokens）
+				if ev.Message.Usage.InputTokens > 0 {
+					ch <- StreamEvent{
+						Type: StreamEventUsage,
+						Usage: &schema.TokenUsage{
+							PromptTokens:     int(ev.Message.Usage.InputTokens),
+							CompletionTokens: int(ev.Message.Usage.OutputTokens),
+							TotalTokens:      int(ev.Message.Usage.InputTokens + ev.Message.Usage.OutputTokens),
+						},
+					}
+				}
+
 			case anthropic.ContentBlockStartEvent:
 				// 当内容块开始时，记录其类型信息。
 				// tool_use 块会在后续 delta 事件中逐步接收 JSON 片段。
