@@ -39,7 +39,7 @@ func main() {
 	registry.Register(tools.NewTaskStopTool())
 
 	// 3. 实例化引擎
-	eng := engine.NewAgentEngine(llmProvider, registry, workDir, true)
+	eng := engine.NewAgentEngine(llmProvider, registry, workDir, true, cfg.Model.PlanMode)
 	eng.SetMaxContextWindow(cfg.Model.MaxContextWindow) // 自适应压缩：设置模型上下文窗口
 
 	// 3.5 注册渐进式暴露技能工具 (read_skill)

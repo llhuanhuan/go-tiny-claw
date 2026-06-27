@@ -72,7 +72,7 @@ func newTestEngine(t *testing.T) (*AgentEngine, string) {
 	registry.Register(tools.NewEditFileTool(workDir))
 	registry.Register(tools.NewBashTool(workDir))
 
-	eng := NewAgentEngine(llmProvider, registry, workDir, true)
+	eng := NewAgentEngine(llmProvider, registry, workDir, true, false)
 	return eng, workDir
 }
 

@@ -4,6 +4,9 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"os"
+	"path/filepath"
+	"strings"
 	"sync"
 
 	ctxpkg "github.com/lhuan/go-tiny-claw/internal/context"
@@ -37,9 +40,10 @@ type AgentEngine struct {
 	// 阶段白白阻塞其他 Agent 的读操作。
 	wsRWMu    sync.RWMutex
 	compactor *ctxpkg.Compactor // 压缩器实例，防止大模型上下文 OOM
+	PlanMode  bool              // 【新增】暴露给外部的计划模式开关
 }
 
-func NewAgentEngine(p provider.LLMProvider, r tools.Registry, workDir string, enableThinking bool) *AgentEngine {
+func NewAgentEngine(p provider.LLMProvider, r tools.Registry, workDir string, enableThinking bool, planMode bool) *AgentEngine {
 	return &AgentEngine{
 		provider:       p,
 		registry:       r,
@@ -48,25 +52,23 @@ func NewAgentEngine(p provider.LLMProvider, r tools.Registry, workDir string, en
 		EnableThinking: enableThinking,
 		taskManager:    tools.GetTaskManager(),
 		trackedTaskIDs: make(map[string]struct{}),
-		// 自适应压缩器：默认 200k Token 窗口，保护最近 6 条消息
-		compactor: ctxpkg.NewCompactor(200000, 6),
+		// 【初始化压缩器】：为了便于今天的极端测试，我们将水位线阈值设积极（例如 3000 字符），
+		//  并保护最近的 6 条消息（大约两轮 Turn 的交互）
+		compactor: ctxpkg.NewCompactor(3000, 6),
+		PlanMode:  planMode,
 	}
-}
-
-// SetMaxContextWindow 设置模型的上下文窗口大小（Token 数），供 Compactor 进行自适应压缩决策。
-// 应在引擎创建后、运行前调用。不同模型的典型值：
-//   - Gemini 3.1 Pro: 1000000
-//   - Claude Sonnet:  200000
-//   - 智谱 GLM-4:     128000
-//   - Llama 本地模型:  8192
-func (e *AgentEngine) SetMaxContextWindow(maxTokens int) {
-	e.compactor.MaxWindowTokens = maxTokens
 }
 
 // SkillLoader 返回引擎内部 Composer 持有的 SkillLoader 引用，
 // 供外部注册 read_skill 工具使用（渐进式暴露架构）。
 func (e *AgentEngine) SkillLoader() *ctxpkg.SkillLoader {
 	return e.composer.SkillLoader()
+}
+
+// SetMaxContextWindow 设置模型的上下文窗口大小（Token 数），供 Compactor 进行自适应压缩决策。
+// 应在引擎创建后、运行前调用。
+func (e *AgentEngine) SetMaxContextWindow(maxTokens int) {
+	e.compactor.MaxWindowTokens = maxTokens
 }
 
 // Run 启动 Agent 的生命周期。
@@ -82,9 +84,57 @@ func (e *AgentEngine) Run(ctx context.Context, session *Session, userPrompt stri
 	session.Append(schema.Message{Role: schema.RoleUser, Content: userPrompt})
 
 	// 根据当前 Session 的工作区，动态组装最新的 System Prompt
-	composer := ctxpkg.NewPromptComposer(session.WorkDir)
+	composer := ctxpkg.NewPromptComposer(session.WorkDir, e.PlanMode)
 	// 【核心修改】动态组装 System Prompt，彻底替换掉以前硬编码的面条提示词！
 	systemMsg := composer.Build()
+
+	// ═══════════════════════════════════════════════════════════════
+	// Plan Mode: 引擎级强制注入 (Engine-Level Enforcement)
+	//
+	// 纯靠 System Prompt 的软约束不够可靠——LLM 可能忽略 Plan Mode 指令。
+	// 这里由引擎程序检查文件系统状态，注入对应的 User 消息作为"硬约束"。
+	// ═══════════════════════════════════════════════════════════════
+	if e.PlanMode {
+		planPath := filepath.Join(session.WorkDir, "PLAN.md")
+		todoPath := filepath.Join(session.WorkDir, "TODO.md")
+		if _, err := os.Stat(planPath); os.IsNotExist(err) {
+			// ═══════════════════════════════════════════════════════
+			// 全新任务：引擎直接创建骨架文件，LLM 只需填充内容
+			// 这比"要求 LLM 从零创建"可靠得多——文件已存在，LLM 只需 edit
+			// ═══════════════════════════════════════════════════════
+			log.Printf("[Engine] 📋 Plan Mode: 创建骨架文件 PLAN.md + TODO.md\n")
+
+			skeletonPlan := fmt.Sprintf("# PLAN — %s\n\n## 任务理解\n（待填充：请用 write_file 重写此文件，写下你对任务的理解）\n\n## 架构设计\n（待填充）\n\n## 技术选型\n（待填充）\n", userPrompt)
+			skeletonTodo := fmt.Sprintf("# TODO\n\n（待填充：请用 write_file 重写此文件，使用 - [ ] 格式拆解可执行步骤）\n")
+
+			if err := os.WriteFile(planPath, []byte(skeletonPlan), 0644); err != nil {
+				log.Printf("[Engine] ⚠️ 创建 PLAN.md 失败: %v\n", err)
+			}
+			if err := os.WriteFile(todoPath, []byte(skeletonTodo), 0644); err != nil {
+				log.Printf("[Engine] ⚠️ 创建 TODO.md 失败: %v\n", err)
+			}
+
+			session.Append(schema.Message{
+				Role: schema.RoleUser,
+				Content: fmt.Sprintf("【Plan Mode 强制指令 — STEP 1】引擎已为你创建了 PLAN.md 和 TODO.md 的骨架文件。\n"+
+					"你的首要任务是填充它们：\n"+
+					"第 1 步：调用 read_file 读取 PLAN.md，了解骨架结构。\n"+
+					"第 2 步：调用 write_file 重写 PLAN.md（path=\"PLAN.md\"），将「（待填充）」替换为你对任务「%s」的理解、架构设计、技术选型。\n"+
+					"第 3 步：调用 write_file 重写 TODO.md（path=\"TODO.md\"），拆解出可执行步骤（使用 - [ ] 格式）。\n"+
+					"在 PLAN.md 和 TODO.md 填充完毕之前，禁止写任何业务代码！", userPrompt),
+			})
+		} else {
+			// 断点续传：强制要求读取 PLAN.md
+			log.Printf("[Engine] 📋 Plan Mode: PLAN.md 已存在，注入 resume 指令\n")
+			session.Append(schema.Message{
+				Role: schema.RoleUser,
+				Content: "【Plan Mode 强制指令 — STEP 1】PLAN.md 已存在。你必须立即执行以下操作：\n" +
+					"1. 调用 read_file 读取 PLAN.md，了解全局目标。\n" +
+					"2. 调用 read_file 读取 TODO.md，找到第一个 - [ ] 未完成任务。\n" +
+					"3. 从该任务直接继续执行，绝对不要覆盖已有文件！",
+			})
+		}
+	}
 
 	// 确保引擎退出时清理所有后台进程
 	defer e.taskManager.Shutdown()
@@ -96,6 +146,24 @@ func (e *AgentEngine) Run(ctx context.Context, session *Session, userPrompt stri
 		//    - 最多 50000 字符（Token 预算维度，防止巨型 ToolResult 撑爆上下文）
 		workingMemory := session.GetWorkingMemory(6, 50000)
 
+		// Plan Mode: 每轮追加轻量级提醒（不写入 Session，避免污染历史）
+		if e.PlanMode {
+			planPath := filepath.Join(session.WorkDir, "PLAN.md")
+			reminder := "[Plan Mode] 你当前处于计划模式。"
+			planContent, err := os.ReadFile(planPath)
+			if err != nil {
+				reminder += "PLAN.md 读取失败！请检查文件系统。"
+			} else if strings.Contains(string(planContent), "（待填充）") {
+				reminder += "PLAN.md 仍为骨架状态！你的首要任务是用 write_file 重写 PLAN.md，将「（待填充）」替换为实际内容。在填充完毕之前禁止写业务代码！"
+			} else {
+				reminder += "每完成一个子任务，必须立即将 TODO.md 中对应行标记为 - [x]。不要一口气写完再打勾。"
+			}
+			workingMemory = append(workingMemory, schema.Message{
+				Role:    schema.RoleUser,
+				Content: reminder,
+			})
+		}
+
 		var contextHistory []schema.Message
 
 		contextHistory = append(contextHistory, systemMsg)
@@ -103,16 +171,18 @@ func (e *AgentEngine) Run(ctx context.Context, session *Session, userPrompt stri
 		contextHistory = append(contextHistory, workingMemory...)
 
 		// 2. 【核心注入点】: 在向 Provider 发起推理前，过一遍内存压缩器！
-		// 无论你带出了多少上下文，如果字符总数超标，早期日志将被掩码化，超大日志将被掐头去尾
-		contextHistory = e.compactor.Compact(contextHistory)
+		//无论你带出了多少上下文，如果字符总数超标，早期日志将被掩码化，超大日志将被掐头去尾
 
-		// 3. ================= Phase 1: Thinking =================
+		compactedContext := e.compactor.Compact(contextHistory)
+
+		// 3. 后续的 Provider.Generate 全面使用被保护过的新鲜上下文 (compactedContext)
+		// 2. ================= Phase 1: Thinking =================
 
 		if e.EnableThinking {
 			if reporter != nil {
 				reporter.OnThinking(ctx)
 			}
-			thinkResp, err := e.provider.Generate(ctx, contextHistory, nil)
+			thinkResp, err := e.provider.Generate(ctx, compactedContext, nil)
 			if err != nil {
 				return fmt.Errorf("Thinking 阶段生成失败: %w", err)
 			}
@@ -120,27 +190,20 @@ func (e *AgentEngine) Run(ctx context.Context, session *Session, userPrompt stri
 				// 将思考过程持久化到 Session 中！
 				session.Append(*thinkResp)
 				// 把它追加到当前这一轮的临时上下文中，供 Action 阶段使用
-				contextHistory = append(contextHistory, *thinkResp)
+				compactedContext = append(compactedContext, *thinkResp)
 			}
 
 		}
-		// 4. ================= Phase 2: Action =================
-		actionResp, err := e.provider.Generate(ctx, contextHistory, availableTools)
+		// 3. ================= Phase 2: Action =================
+		actionResp, err := e.provider.Generate(ctx, compactedContext, availableTools)
 		if err != nil {
 			return fmt.Errorf("Action 阶段生成失败: %w", err)
 		}
-
-		// 【自适应压缩】从 API 响应中提取真实 Token 消耗，喂给 Compactor 用于下一轮压缩决策
-		if actionResp.Usage != nil && actionResp.Usage.PromptTokens > 0 {
-			e.compactor.UpdateUsage(actionResp.Usage.PromptTokens)
-			log.Printf("[Engine] 📊 Token 消耗: Prompt=%d, Completion=%d, Total=%d",
-				actionResp.Usage.PromptTokens, actionResp.Usage.CompletionTokens, actionResp.Usage.TotalTokens)
-		}
-
-		// 将大模型的行动响应持久化到 Session 中
+		// 【驾驭精髓】：注意，写入 Session（硬盘/全量内存）的永远是全量的真实响应，不受 Compact 影响！
+		// // Compact 只作用于本轮发给大模型的那个临时 Context。
 		session.Append(*actionResp)
 
-		contextHistory = append(contextHistory, *actionResp)
+		compactedContext = append(compactedContext, *actionResp)
 
 		if actionResp.Content != "" && reporter != nil {
 			reporter.OnMessage(ctx, actionResp.Content)
@@ -151,7 +214,7 @@ func (e *AgentEngine) Run(ctx context.Context, session *Session, userPrompt stri
 			break
 		}
 
-		// 5. ================= 并发执行底层工具 =================
+		// 4. ================= 并发执行底层工具 =================
 		e.executeToolsInParallel(ctx, actionResp.ToolCalls, &contextHistory, reporter)
 
 		// 将本轮工具执行结果（Observation）持久化到 Session 中

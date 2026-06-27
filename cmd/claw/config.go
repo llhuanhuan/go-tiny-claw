@@ -37,7 +37,8 @@ type WechatConfig struct {
 
 // ModelConfig 定义模型相关的配置，用于自适应压缩决策。
 type ModelConfig struct {
-	MaxContextWindow int `yaml:"max_context_window"` // 模型上下文窗口 Token 数，默认 200000
+	MaxContextWindow int  `yaml:"max_context_window"` // 模型上下文窗口 Token 数，默认 200000
+	PlanMode         bool `yaml:"plan_mode"`          // 计划模式开关：开启后 Agent 使用 PLAN.md/TODO.md 进行长程任务管理
 }
 
 // DefaultConfig 返回一套开箱即用的默认配置。
@@ -115,5 +116,10 @@ func (c *AppConfig) applyEnvOverrides() {
 		if _, err := fmt.Sscanf(v, "%d", &window); err == nil && window > 0 {
 			c.Model.MaxContextWindow = window
 		}
+	}
+
+	// 计划模式
+	if v := os.Getenv("PLAN_MODE"); v == "true" || v == "1" {
+		c.Model.PlanMode = true
 	}
 }
