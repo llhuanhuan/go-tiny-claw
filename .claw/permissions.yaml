@@ -1,0 +1,159 @@
+# go-tiny-claw 动态权限配置
+# 支持热更新：修改此文件后自动生效，无需重启引擎
+# 参考 Claude Code 的 allow/ask/deny 三态分类
+
+version: "1.0"
+last_updated: "2026-06-27T23:20:00+08:00"
+
+# =============================================================================
+# 权限规则引擎
+# =============================================================================
+# 每条规则包含：
+#   - pattern: 命令匹配模式（支持正则）
+#   - action: 动作类型（allow/ask/deny）
+#   - reason: 拦截原因（deny/ask 时必填）
+#   - priority: 优先级（数字越大优先级越高，默认 0）
+#   - tags: 标签（用于分类和管理）
+# =============================================================================
+
+rules:
+  # --------------------------------------------------------------------------
+  # DENY - 直接拦截，不允许执行
+  # --------------------------------------------------------------------------
+  - id: "deny-rm-rf-root"
+    pattern: "rm\\s+(-[rRf]+\\s+)*(/|\\*)"
+    action: "deny"
+    reason: "禁止递归删除根目录或通配符，可能导致系统损坏"
+    priority: 100
+    tags: ["dangerous", "filesystem"]
+    enabled: true
+
+  - id: "deny-format-disk"
+    pattern: "(format|mkfs|fdisk|dd\\s+if=).*"
+    action: "deny"
+    reason: "磁盘格式化命令被禁止，可能导致数据丢失"
+    priority: 100
+    tags: ["dangerous", "disk"]
+    enabled: true
+
+  - id: "deny-sudo"
+    pattern: "sudo\\s+.*"
+    action: "deny"
+    reason: "禁止使用 sudo 提权，如需管理员权限请联系运维"
+    priority: 90
+    tags: ["security", "privilege"]
+    enabled: true
+
+  - id: "deny-drop-database"
+    pattern: "(DROP\\s+DATABASE|DROP\\s+SCHEMA)"
+    action: "deny"
+    reason: "禁止删除数据库/Schema，请使用 TRUNCATE 或手动确认"
+    priority: 100
+    tags: ["dangerous", "database"]
+    enabled: true
+
+  - id: "deny-kubectl-delete-ns"
+    pattern: "kubectl\\s+delete\\s+namespace"
+    action: "deny"
+    reason: "禁止删除 Kubernetes Namespace，可能导致资源泄露"
+    priority: 90
+    tags: ["dangerous", "kubernetes"]
+    enabled: true
+
+  # --------------------------------------------------------------------------
+  # ASK - 需要人工审批才能执行
+  # --------------------------------------------------------------------------
+  - id: "ask-rm-file"
+    pattern: "rm\\s+[^/]*"
+    action: "ask"
+    reason: "删除文件需要人工确认"
+    priority: 50
+    tags: ["filesystem", "destructive"]
+    enabled: true
+
+  - id: "ask-kubectl-delete"
+    pattern: "kubectl\\s+delete\\s+.*"
+    action: "ask"
+    reason: "删除 Kubernetes 资源需要人工确认"
+    priority: 50
+    tags: ["kubernetes", "destructive"]
+    enabled: true
+
+  - id: "ask-docker-rm"
+    pattern: "docker\\s+(rm|rmi|stop)\\s+.*"
+    action: "ask"
+    reason: "删除/停止 Docker 容器需要人工确认"
+    priority: 50
+    tags: ["docker", "destructive"]
+    enabled: true
+
+  - id: "ask-git-force-push"
+    pattern: "git\\s+push\\s+.*--force.*"
+    action: "ask"
+    reason: "强制推送需要人工确认，可能覆盖远程提交"
+    priority: 50
+    tags: ["git", "destructive"]
+    enabled: true
+
+  - id: "ask-mysql-truncate"
+    pattern: "TRUNCATE\\s+TABLE\\s+.*"
+    action: "ask"
+    reason: "清空表数据需要人工确认"
+    priority: 50
+    tags: ["database", "destructive"]
+    enabled: true
+
+  # --------------------------------------------------------------------------
+  # ALLOW - 允许执行（默认规则）
+  # --------------------------------------------------------------------------
+  - id: "allow-read-commands"
+    pattern: "(ls|cat|head|tail|grep|find|wc|echo|pwd|whoami|date)\\s*.*"
+    action: "allow"
+    reason: "只读命令允许执行"
+    priority: 10
+    tags: ["readonly", "safe"]
+    enabled: true
+
+  - id: "allow-go-commands"
+    pattern: "go\\s+(test|build|run|vet|fmt|mod)\\s*.*"
+    action: "allow"
+    reason: "Go 开发命令允许执行"
+    priority: 10
+    tags: ["development", "go"]
+    enabled: true
+
+  - id: "allow-git-read"
+    pattern: "git\\s+(status|log|diff|show|branch|remote)\\s*.*"
+    action: "allow"
+    reason: "Git 只读命令允许执行"
+    priority: 10
+    tags: ["git", "readonly"]
+    enabled: true
+
+  - id: "allow-npm-yarn"
+    pattern: "(npm|yarn|pnpm)\\s+(install|run|test|build|start)\\s*.*"
+    action: "allow"
+    reason: "Node.js 包管理命令允许执行"
+    priority: 10
+    tags: ["development", "nodejs"]
+    enabled: true
+
+# =============================================================================
+# 全局配置
+# =============================================================================
+settings:
+  # 默认动作：当没有规则匹配时的动作
+  # 可选值: allow, ask, deny
+  default_action: "ask"
+
+  # 审批超时时间（秒）
+  approval_timeout: 300
+
+  # 是否记录所有命令执行日志
+  log_all_commands: true
+
+  # 热更新检查间隔（秒）
+  hot_reload_interval: 5
+
+  # 配置文件版本校验
+  validate_on_load: true

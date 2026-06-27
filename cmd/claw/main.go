@@ -12,6 +12,7 @@ import (
 
 	"github.com/lhuan/go-tiny-claw/internal/engine"
 	"github.com/lhuan/go-tiny-claw/internal/feishu"
+	"github.com/lhuan/go-tiny-claw/internal/permissions"
 	"github.com/lhuan/go-tiny-claw/internal/provider"
 	"github.com/lhuan/go-tiny-claw/internal/tools"
 	"github.com/lhuan/go-tiny-claw/internal/wechat"
@@ -29,24 +30,37 @@ func main() {
 	// 1. 初始化 LLM Provider
 	llmProvider := detectProvider()
 
-	// 2. 初始化 Tool Registry
+	// 2. 初始化动态权限引擎
+	permConfigPath := filepath.Join(workDir, ".claw", "permissions.yaml")
+	permEngine := permissions.NewEngine(permConfigPath)
+	if err := permEngine.Load(); err != nil {
+		log.Printf("[Bootstrap] ⚠️ 权限配置加载失败，使用默认策略: %v", err)
+	} else {
+		// 启动热更新监听
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		go permEngine.StartHotReload(ctx)
+		log.Printf("[Bootstrap] ✅ 动态权限引擎已启动")
+	}
+
+	// 3. 初始化 Tool Registry
 	registry := tools.NewRegistry()
 	registry.Register(tools.NewReadFileTool(workDir))
 	registry.Register(tools.NewWriteFileTool(workDir))
 	registry.Register(tools.NewEditFileTool(workDir))
-	registry.Register(tools.NewBashTool(workDir))
+	registry.Register(tools.NewBashToolWithPermissions(workDir, permEngine))
 	registry.Register(tools.NewTaskOutputTool())
 	registry.Register(tools.NewTaskStopTool())
 
-	// 3. 实例化引擎
+	// 4. 实例化引擎
 	eng := engine.NewAgentEngine(llmProvider, registry, workDir, true, cfg.Model.PlanMode)
 	eng.SetMaxContextWindow(cfg.Model.MaxContextWindow) // 自适应压缩：设置模型上下文窗口
 
-	// 3.5 注册渐进式暴露技能工具 (read_skill)
+	// 4.5 注册渐进式暴露技能工具 (read_skill)
 	skillLoader := eng.SkillLoader()
 	registry.Register(tools.NewReadSkillTool(skillLoader))
 
-	// 4. 检测运行模式（优先飞书 > 微信 > 终端）
+	// 5. 检测运行模式（优先飞书 > 微信 > 终端）
 	switch {
 	case cfg.Feishu.AppID != "":
 		runFeishu(eng, cfg)

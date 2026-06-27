@@ -6,9 +6,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"os/exec"
-	"strings"
 	"time"
 
+	"github.com/lhuan/go-tiny-claw/internal/permissions"
 	"github.com/lhuan/go-tiny-claw/internal/schema"
 )
 
@@ -17,36 +17,21 @@ import (
 //   - 同步模式 (默认): 阻塞等待,30s 超时,适用于 ls / go test 等短命令。
 //   - 后台模式 (run_in_background: true): 立即返回 Task ID,进程持续运行,
 //     适用于 npm run dev / python server.py 等守护进程。
-// 危险命令模式列表
-var dangerousPatterns = []string{
-	"rm -rf",
-	"rm -fr",
-	"rmdir /s",
-	"rmdir /q",
-	"format ",
-	"mkfs",
-	"dd if=",
-	"chmod -R 777",
-	"chown -R",
-}
-
-// isDangerousCommand 检查命令是否包含危险模式
-func isDangerousCommand(cmd string) bool {
-	lowerCmd := strings.ToLower(cmd)
-	for _, pattern := range dangerousPatterns {
-		if strings.Contains(lowerCmd, pattern) {
-			return true
-		}
-	}
-	return false
-}
-
 type BashTool struct {
 	workDir string // 工作区约束
+	permEngine *permissions.Engine // 动态权限引擎
 }
 
 func NewBashTool(workDir string) *BashTool {
 	return &BashTool{workDir: workDir}
+}
+
+// NewBashToolWithPermissions 创建带权限引擎的 BashTool
+func NewBashToolWithPermissions(workDir string, permEngine *permissions.Engine) *BashTool {
+	return &BashTool{
+		workDir:    workDir,
+		permEngine: permEngine,
+	}
 }
 
 func (t *BashTool) Name() string {
@@ -89,11 +74,23 @@ func (t *BashTool) Execute(ctx context.Context, args json.RawMessage) (string, e
 		return "", NewToolError(ErrParamParseFailed, "参数解析失败", err)
 	}
 
-	// 【安全检查】：拦截危险命令
-	if isDangerousCommand(input.Command) {
-		return "", fmt.Errorf("⚠️ 危险命令被拦截: %s\n"+
-			"原因: 该命令可能导致数据丢失或系统损坏。\n"+
-			"如需执行，请使用更安全的替代方案或联系管理员。", input.Command)
+	// 【安全检查】：使用动态权限引擎检查命令
+	if t.permEngine != nil {
+		result := t.permEngine.Check(ctx, input.Command)
+		switch result.Action {
+		case permissions.ActionDeny:
+			return "", fmt.Errorf("🚫 命令被拦截 [%s]\n"+
+				"原因: %s\n"+
+				"匹配规则: %s", input.Command, result.Reason, result.RuleID)
+		case permissions.ActionAsk:
+			// TODO: 集成审批流程，暂时返回错误
+			return "", fmt.Errorf("⏳ 命令需要人工审批 [%s]\n"+
+				"原因: %s\n"+
+				"匹配规则: %s\n"+
+				"请使用 approve 命令批准执行", input.Command, result.Reason, result.RuleID)
+		case permissions.ActionAllow:
+			// 允许执行，继续
+		}
 	}
 
 	// ====================================================================
