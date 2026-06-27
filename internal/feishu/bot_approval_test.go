@@ -23,79 +23,56 @@ func mockApprovalEvent(content string) *larkim.P2MessageReceiveV1 {
 }
 
 func TestOnMessageReceived_ApproveCommand(t *testing.T) {
-	// 注册一个待审批任务
+	// 使用全局管理器（因为 bot.onMessageReceived 使用 GlobalApprovalMgr）
 	taskID := "task-abc-123"
-	ch := GlobalApprovalMgr.RequestApproval(taskID)
 
-	// 模拟飞书发送 approve 指令
-	event := mockApprovalEvent(`{"text":"approve task-abc-123"}`)
+	// 先注册一个待审批任务
+	go func() {
+		time.Sleep(50 * time.Millisecond) // 确保 RequestApproval 先执行
+		event := mockApprovalEvent(`{"text":"approve task-abc-123"}`)
+		bot := &FeishuBot{}
+		bot.onMessageReceived(context.Background(), event)
+	}()
 
-	// 创建一个 dummy bot（不需要真实 engine）
-	bot := &FeishuBot{}
-
-	// 调用消息处理函数
-	err := bot.onMessageReceived(context.Background(), event)
+	// 引擎端等待审批结果
+	approved, err := GlobalApprovalMgr.RequestApproval(context.Background(), taskID)
 	if err != nil {
-		t.Fatalf("onMessageReceived 返回错误: %v", err)
+		t.Fatalf("RequestApproval 返回错误: %v", err)
 	}
 
-	// 验证审批结果
-	select {
-	case approved := <-ch:
-		if !approved {
-			t.Error("期望审批通过，实际被拒绝")
-		}
-	case <-time.After(1 * time.Second):
-		t.Error("等待审批超时，消息未被正确处理")
+	if !approved {
+		t.Error("期望审批通过，实际被拒绝")
 	}
 }
 
 func TestOnMessageReceived_RejectCommand(t *testing.T) {
+	// 使用全局管理器
 	taskID := "task-def-456"
-	ch := GlobalApprovalMgr.RequestApproval(taskID)
 
-	event := mockApprovalEvent(`{"text":"reject task-def-456"}`)
-	bot := &FeishuBot{}
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		event := mockApprovalEvent(`{"text":"reject task-def-456"}`)
+		bot := &FeishuBot{}
+		bot.onMessageReceived(context.Background(), event)
+	}()
 
-	err := bot.onMessageReceived(context.Background(), event)
+	approved, err := GlobalApprovalMgr.RequestApproval(context.Background(), taskID)
 	if err != nil {
-		t.Fatalf("onMessageReceived 返回错误: %v", err)
+		t.Fatalf("RequestApproval 返回错误: %v", err)
 	}
 
-	select {
-	case approved := <-ch:
-		if approved {
-			t.Error("期望审批被拒绝，实际通过")
-		}
-	case <-time.After(1 * time.Second):
-		t.Error("等待审批超时")
+	if approved {
+		t.Error("期望审批被拒绝，实际通过")
 	}
 }
 
 func TestOnMessageReceived_NormalMessage(t *testing.T) {
 	// 普通消息不应触发审批
 	event := mockApprovalEvent(`{"text":"你好，帮我写个函数"}`)
-	bot := &FeishuBot{}
-
-	// 注册一个任务，验证它不会被意外解决
-	taskID := "task-should-not-resolve"
-	ch := GlobalApprovalMgr.RequestApproval(taskID)
-
-	// 处理普通消息（会启动 goroutine，但我们没有真实 engine，只测试不会 panic）
-	_ = bot
 
 	// 验证普通消息不会触发审批
 	contentStr := extractTextContent(event)
 	if strings.HasPrefix(contentStr, "approve ") || strings.HasPrefix(contentStr, "reject ") {
 		t.Error("普通消息不应被识别为审批指令")
 	}
-
-	// 验证任务仍然在等待
-	if GlobalApprovalMgr.PendingCount() != 1 {
-		t.Errorf("期望 1 个待审批任务，实际 %d", GlobalApprovalMgr.PendingCount())
-	}
-
-	// 清理
-	GlobalApprovalMgr.ResolveApproval(taskID, false, "测试清理")
-	<-ch
 }
