@@ -54,8 +54,7 @@ func (t *ReadFileTool) Execute(ctx context.Context, args json.RawMessage) (strin
 	// 1. 延迟解析：将大模型传过来的 JSON 参数解析为强类型结构体
 	var input readFileArgs
 	if err := json.Unmarshal(args, &input); err != nil {
-		// 返回 error 会被 Registry 捕获并传给大模型，模型会知道自己 JSON 格式写错了
-		return "", fmt.Errorf("参数解析失败: %w", err)
+		return "", NewToolError(ErrParamParseFailed, "参数解析失败", err)
 	}
 
 	// 2. 拼接绝对路径 (注意：生产环境中需要做路径穿越检测防范，防止 ../../etc/passwd)
@@ -64,13 +63,19 @@ func (t *ReadFileTool) Execute(ctx context.Context, args json.RawMessage) (strin
 	// 3. 执行物理 IO 操作
 	file, err := os.Open(fullPath)
 	if err != nil {
-		return "", fmt.Errorf("打开文件失败: %w", err)
+		if os.IsNotExist(err) {
+			return "", NewToolError(ErrFileNotFound, fmt.Sprintf("文件不存在: %s", input.Path), err)
+		}
+		if os.IsPermission(err) {
+			return "", NewToolError(ErrPermissionDenied, fmt.Sprintf("无权限读取: %s", input.Path), err)
+		}
+		return "", NewToolError(ErrFileReadFailed, "打开文件失败", err)
 	}
 	defer file.Close()
 
 	content, err := io.ReadAll(file)
 	if err != nil {
-		return "", fmt.Errorf("读取文件内容失败: %w", err)
+		return "", NewToolError(ErrFileReadFailed, "读取文件内容失败", err)
 	}
 
 	// 4. 【核心防线】长度截断保护

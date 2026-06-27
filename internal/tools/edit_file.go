@@ -79,18 +79,21 @@ type editFileArgs struct {
 func (t *EditFileTool) Execute(ctx context.Context, args json.RawMessage) (string, error) {
 	var input editFileArgs
 	if err := json.Unmarshal(args, &input); err != nil {
-		return "", fmt.Errorf("参数解析失败: %w", err)
+		return "", NewToolError(ErrParamParseFailed, "参数解析失败", err)
 	}
 
 	if input.OldString == "" {
-		return "", fmt.Errorf("old_string 不能为空")
+		return "", NewToolError(ErrEditOldEmpty, "old_string 不能为空", nil)
 	}
 
 	fullPath := filepath.Join(t.workDir, input.Path)
 
 	raw, err := os.ReadFile(fullPath)
 	if err != nil {
-		return "", fmt.Errorf("读取文件失败: %w", err)
+		if os.IsNotExist(err) {
+			return "", NewToolError(ErrFileNotFound, fmt.Sprintf("文件不存在: %s", input.Path), err)
+		}
+		return "", NewToolError(ErrFileReadFailed, "读取文件失败", err)
 	}
 
 	originalContent := string(raw)
@@ -109,14 +112,18 @@ func (t *EditFileTool) Execute(ctx context.Context, args json.RawMessage) (strin
 		if len(preview) > 1200 {
 			preview = originalContent[:1200] + "\n...[已截断]..."
 		}
-		return "", fmt.Errorf(
-			"编辑文件 %s 失败（经 %d 级模糊匹配仍无法定位）。\n\n%s\n\n文件预览：\n---\n%s\n---",
-			input.Path, level, err.Error(), preview,
-		)
+		// 根据错误类型分派错误码
+		code := ErrEditMatchNotFound
+		if strings.Contains(err.Error(), "匹配到了") {
+			code = ErrEditMultipleMatch
+		}
+		return "", NewToolError(code,
+			fmt.Sprintf("编辑文件 %s 失败（Level %d）: %s\n文件预览:\n---\n%s\n---",
+				input.Path, level, err.Error(), preview), nil)
 	}
 
 	if err := os.WriteFile(fullPath, []byte(result), 0644); err != nil {
-		return "", fmt.Errorf("写入文件失败: %w", err)
+		return "", NewToolError(ErrFileWriteFailed, "写入文件失败", err)
 	}
 
 	return fmt.Sprintf("成功编辑文件 %s（匹配级别: Level %d）。", input.Path, level), nil

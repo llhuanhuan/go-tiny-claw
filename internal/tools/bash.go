@@ -61,7 +61,7 @@ type bashArgs struct {
 func (t *BashTool) Execute(ctx context.Context, args json.RawMessage) (string, error) {
 	var input bashArgs
 	if err := json.Unmarshal(args, &input); err != nil {
-		return "", fmt.Errorf("参数解析失败: %w", err)
+		return "", NewToolError(ErrParamParseFailed, "参数解析失败", err)
 	}
 
 	// ====================================================================
