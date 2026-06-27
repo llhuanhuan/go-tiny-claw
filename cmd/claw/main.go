@@ -67,6 +67,7 @@ func main() {
 	subRegistry.Register(tools.NewBashToolWithPermissions(workDir, permEngine))
 	subRegistry.Register(tools.NewReadSkillTool(skillLoader))
 	registry.Register(tools.NewSubagentTool(eng, subRegistry, nil))
+	registry.Register(tools.NewCheckSubagentTool())
 
 	// 5. 检测运行模式（优先飞书 > 微信 > 终端）
 	switch {

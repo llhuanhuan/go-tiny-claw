@@ -168,6 +168,13 @@ func (e *AgentEngine) Run(ctx context.Context, session *Session, userPrompt stri
 			})
 		}
 
+		// ═══════════════════════════════════════════════════════════════
+		// 异步子智能体通知注入：每轮检查是否有子智能体已完成
+		// 完成的子智能体结果作为 User 消息注入 workingMemory，
+		// 主 Agent 在本轮推理时即可感知到结果，无需手动调用 check_subagent。
+		// ═══════════════════════════════════════════════════════════════
+		e.injectSubagentNotifications(&workingMemory)
+
 		var contextHistory []schema.Message
 
 		contextHistory = append(contextHistory, systemMsg)
@@ -291,6 +298,41 @@ func (e *AgentEngine) injectBackgroundNotifications(contextHistory *[]schema.Mes
 	}
 
 	log.Printf("[Engine] 注入了 %d 条后台任务通知到对话上下文\n", len(notices))
+}
+
+// injectSubagentNotifications 检查 SubagentManager 中所有已完成的子智能体，
+// 将其结果作为 User 消息注入 workingMemory。
+// 每个已完成的子智能体只通知一次（通过 MarkNotified 防止重复注入）。
+func (e *AgentEngine) injectSubagentNotifications(workingMemory *[]schema.Message) {
+	mgr := tools.GetSubagentManager()
+	injected := 0
+
+	for _, snap := range mgr.List() {
+		if !snap.Done || snap.Notified {
+			continue
+		}
+
+		var content string
+		if snap.Error != nil {
+			content = fmt.Sprintf("[子智能体通知] 任务 '%s' (ID: %s) 执行失败: %v",
+				snap.Prompt, snap.ID, snap.Error)
+		} else {
+			content = fmt.Sprintf("[子智能体通知] 任务 '%s' (ID: %s) 已完成，探索报告:\n%s",
+				snap.Prompt, snap.ID, snap.Summary)
+		}
+
+		*workingMemory = append(*workingMemory, schema.Message{
+			Role:    schema.RoleUser,
+			Content: content,
+		})
+
+		mgr.MarkNotified(snap.ID)
+		injected++
+	}
+
+	if injected > 0 {
+		log.Printf("[Engine] 📬 注入了 %d 条子智能体完成通知到对话上下文\n", injected)
+	}
 }
 
 // streamGenerate 发起流式推理，边接收边打印，最终返回组装好的 schema.Message。
@@ -581,7 +623,9 @@ func (e *AgentEngine) executeToolsInParallel(ctx context.Context, toolCalls []sc
 }
 func (e *AgentEngine) isWriteTool(name string) bool {
 	switch name {
-	case "read_file", "TaskOutput":
+	case "read_file", "TaskOutput", "spawn_subagent":
+		// spawn_subagent 本质是只读委派：子智能体持有 readOnlyRegistry，
+		// 只能读文件、执行只读 bash，不会修改工作区。因此可以安全地并行执行。
 		return false
 	default:
 		return true

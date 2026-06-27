@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log"
 
 	"github.com/lhuan/go-tiny-claw/internal/schema"
 )
@@ -18,15 +17,22 @@ type AgentRunner interface {
 	RunSub(ctx context.Context, taskPrompt string, readOnlyRegistry Registry, reporter interface{}) (string, error)
 }
 
-type SubagentTool struct {
-	runner AgentRunner
+// ═══════════════════════════════════════════════════════════════
+// SubagentTool — 异步委派工具
+//
+// 采用 Spawn + Poll 模式：
+//   - Execute() 立即返回 subagent_id，不阻塞主循环
+//   - 子智能体在后台 goroutine 中执行
+//   - 主循环每轮自动注入已完成子智能体的通知
+//   - 也可通过 check_subagent 主动轮询
+// ═══════════════════════════════════════════════════════════════
 
-	// 为子智能体准备的专属、受限的“只读”注册表
+type SubagentTool struct {
+	runner           AgentRunner
 	readOnlyRegistry Registry
-	reporter         interface{} // 暂时用 interface 规避包循环依赖，底层通过断言使用
+	reporter         interface{}
 }
 
-// NewSubagentTool 构造函数
 func NewSubagentTool(runner AgentRunner, readOnlyRegistry Registry, reporter interface{}) *SubagentTool {
 	return &SubagentTool{
 		runner:           runner,
@@ -35,21 +41,20 @@ func NewSubagentTool(runner AgentRunner, readOnlyRegistry Registry, reporter int
 	}
 }
 
-func (t *SubagentTool) Name() string {
-	return "spawn_subagent"
-}
+func (t *SubagentTool) Name() string { return "spawn_subagent" }
 
-// Definition 向主 Agent 暴露这个工具的强大能力
 func (t *SubagentTool) Definition() schema.ToolDefinition {
 	return schema.ToolDefinition{
-		Name:        t.Name(),
-		Description: "派出一个专门用于深度探索（Exploration）的子智能体。当你需要阅读大量代码、跨文件查找逻辑时请调用此工具。它在探索完毕后，会给你返回一份极度精炼的摘要报告。",
+		Name: "spawn_subagent",
+		Description: "派出一个后台子智能体执行深度探索任务（非阻塞）。" +
+			"子智能体启动后立即返回 ID，它会在后台独立工作。" +
+			"完成后系统会自动通知你结果，你也可以随时调用 check_subagent 主动查询。",
 		InputSchema: map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
 				"task_prompt": map[string]interface{}{
 					"type":        "string",
-					"description": "给子智能体下达的明确指令。",
+					"description": "给子智能体下达的明确探索指令。",
 				},
 			},
 			"required": []string{"task_prompt"},
@@ -67,20 +72,68 @@ func (t *SubagentTool) Execute(ctx context.Context, args json.RawMessage) (strin
 		return "", fmt.Errorf("解析参数失败: %w", err)
 	}
 
-	log.Printf("[Subagent] 🚀 主 Agent 发起委派！正在拉起探路者: [%s]...\n", input.TaskPrompt)
+	// 【核心改造】：Spawn 立即返回 ID，不阻塞主循环
+	id := GetSubagentManager().Spawn(t.runner, input.TaskPrompt, t.readOnlyRegistry, t.reporter)
 
-	// 【核心降维打击】：拉起一个完全物理隔离的子循环
-	// 我们把针对该任务的专项指令传给子智能体，并仅提供 readOnlyRegistry。
-	// (子智能体只能读文件或执行只读的 bash，不能搞破坏)
-	summary, err := t.runner.RunSub(ctx, input.TaskPrompt, t.readOnlyRegistry, t.reporter)
+	return fmt.Sprintf(
+		"子智能体已启动，ID: %s。它将在后台执行探索任务，完成后会自动通知你结果。"+
+			"你也可以随时调用 check_subagent(id=\"%s\") 主动查询进度。"+
+			"现在你可以继续做其他工作。", id, id), nil
+}
 
-	if err != nil {
-		return fmt.Errorf("子智能体执行失败: %v", err).Error(), nil
+// ═══════════════════════════════════════════════════════════════
+// CheckSubagentTool — 子智能体状态查询工具
+//
+// 主 Agent 主动轮询子智能体是否已完成，获取探索报告。
+// ═══════════════════════════════════════════════════════════════
+
+type CheckSubagentTool struct{}
+
+func NewCheckSubagentTool() *CheckSubagentTool {
+	return &CheckSubagentTool{}
+}
+
+func (t *CheckSubagentTool) Name() string { return "check_subagent" }
+
+func (t *CheckSubagentTool) Definition() schema.ToolDefinition {
+	return schema.ToolDefinition{
+		Name:        "check_subagent",
+		Description: "查询子智能体的执行状态。传入 spawn_subagent 返回的 ID，获取探索报告或查看进度。",
+		InputSchema: map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"id": map[string]interface{}{
+					"type":        "string",
+					"description": "子智能体 ID（如 sa_1）。",
+				},
+			},
+			"required": []string{"id"},
+		},
+	}
+}
+
+type checkSubagentArgs struct {
+	ID string `json:"id"`
+}
+
+func (t *CheckSubagentTool) Execute(ctx context.Context, args json.RawMessage) (string, error) {
+	var input checkSubagentArgs
+	if err := json.Unmarshal(args, &input); err != nil {
+		return "", fmt.Errorf("解析参数失败: %w", err)
 	}
 
-	log.Printf("[Subagent] ✅ 子智能体任务结束。报告返回给主干...")
+	snapshot, ok := GetSubagentManager().Get(input.ID)
+	if !ok {
+		return fmt.Sprintf("子智能体 ID '%s' 不存在。请检查 ID 是否正确。", input.ID), nil
+	}
 
-	// 最终，几万字的代码探索，化作了这一段轻量级的 Summary，
-	// 就像一次普通的 API 调用一样，返回给了始终保持清醒的主 Agent。
-	return fmt.Sprintf("【子智能体探索报告】:\n%s", summary), nil
+	if !snapshot.Done {
+		return fmt.Sprintf("子智能体 %s 仍在运行中（任务: %s）。请稍后再查询，或先去做其他工作。", snapshot.ID, snapshot.Prompt), nil
+	}
+
+	if snapshot.Error != nil {
+		return fmt.Sprintf("子智能体 %s 执行失败: %v", snapshot.ID, snapshot.Error), nil
+	}
+
+	return fmt.Sprintf("【子智能体探索报告】(ID: %s):\n%s", snapshot.ID, snapshot.Summary), nil
 }
