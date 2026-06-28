@@ -20,9 +20,26 @@ type BaseTool interface {
 	Execute(ctx context.Context, args json.RawMessage) (string, error)
 }
 
-// MiddlewareFunc 定义了中间件的签名。
-// // 它接收当前的 ToolCall，并返回一个是否允许执行的布尔值 (allowed)，以及拦截时的原因 (rejectReason)
+// MiddlewareFunc 定义了前置拦截器的签名。
+// 它在工具执行前运行，决定是否放行。
+// 适用于权限检查、参数校验等"门卫"场景。
 type MiddlewareFunc func(ctx context.Context, call schema.ToolCall) (allowed bool, rejectReason string)
+
+// ToolHandler 是工具实际执行函数的签名，供环绕式中间件调用 next 时使用。
+type ToolHandler func(ctx context.Context, call schema.ToolCall) schema.ToolResult
+
+// ToolMiddlewareFunc 定义了环绕式中间件的签名（经典 Decorator 模式）。
+// 它可以包裹整个工具执行过程：在 next(call) 前后插入逻辑（如计时、日志、重试）。
+//
+// 使用示例：
+//
+//	func TimerMiddleware(ctx context.Context, call schema.ToolCall, next ToolHandler) schema.ToolResult {
+//	    start := time.Now()
+//	    result := next(call)              // 真正执行工具
+//	    log.Printf("耗时: %v", time.Since(start))
+//	    return result
+//	}
+type ToolMiddlewareFunc func(ctx context.Context, call schema.ToolCall, next ToolHandler) schema.ToolResult
 
 // Registry 定义了工具的注册与分发接口
 type Registry interface {
@@ -35,16 +52,22 @@ type Registry interface {
 	// Execute 实际路由并执行模型请求的工具调用
 	Execute(ctx context.Context, call schema.ToolCall) schema.ToolResult
 
-	// 全局Middleware 挂载点
+	// Use 挂载前置拦截器（门卫模式：approve/reject）
 	Use(mw MiddlewareFunc)
+
+	// UseToolMiddleware 挂载环绕式中间件（装饰器模式：包裹整个执行过程）
+	// 执行顺序：后挂载的先执行（类似洋葱模型）
+	UseToolMiddleware(mw ToolMiddlewareFunc)
 }
 
 // registryImpl 是 Registry 接口的默认实现
 type registryImpl struct {
 	// 使用 map 以工具的 Name 作为 Key 进行快速 O(1) 路由查找
 	tools map[string]BaseTool
-	// 保存挂载的中间件链
+	// 保存挂载的前置拦截器链
 	middlewares []MiddlewareFunc
+	// 保存挂载的环绕式中间件链
+	toolMiddlewares []ToolMiddlewareFunc
 }
 
 func NewRegistry() Registry {
@@ -75,6 +98,10 @@ func (r *registryImpl) Use(mv MiddlewareFunc) {
 	r.middlewares = append(r.middlewares, mv)
 }
 
+func (r *registryImpl) UseToolMiddleware(mw ToolMiddlewareFunc) {
+	r.toolMiddlewares = append(r.toolMiddlewares, mw)
+}
+
 func (r *registryImpl) Execute(ctx context.Context, call schema.ToolCall) schema.ToolResult {
 	// 1. 路由查找：如果在注册表中找不到该工具，这是模型产生了幻觉，直接向模型抛出错误
 	tool, exists := r.tools[call.Name]
@@ -87,7 +114,7 @@ func (r *registryImpl) Execute(ctx context.Context, call schema.ToolCall) schema
 		}
 	}
 
-	// 2. 【核心防御】在执行底层逻辑前，依次运行所有的 Middleware
+	// 2. 【核心防御】在执行底层逻辑前，依次运行所有的前置 Middleware
 	for _, mv := range r.middlewares {
 		allowed, reason := mv(ctx, call)
 		if !allowed {
@@ -99,22 +126,45 @@ func (r *registryImpl) Execute(ctx context.Context, call schema.ToolCall) schema
 			}
 		}
 	}
-	// 3. 执行工具逻辑：将原始的 JSON 字节流直接丢给具体工具
-	output, err := tool.Execute(ctx, call.Arguments)
 
-	// 4. 封装结果：将执行结果或底层物理错误封装后返回给 Main Loop
-	if err != nil {
-		errMsg := fmt.Sprintf("Error executing %s: %v", call.Name, err)
+	// 3. 构建环绕式中间件链（洋葱模型：后挂载的先执行）
+	//    最内层是真正的工具执行逻辑
+	handler := r.buildToolHandler(ctx, tool)
+
+	// 4. 执行整个中间件链
+	return handler(ctx, call)
+}
+
+// buildToolHandler 构建环绕式中间件链。
+// 从最内层（真实执行）开始，逐层向外包裹。
+// 执行顺序：middleware[N-1](最外层) → ... → middleware[0](最内层) → tool.Execute
+func (r *registryImpl) buildToolHandler(ctx context.Context, tool BaseTool) ToolHandler {
+	// 最内层：真实的工具执行逻辑
+	handler := func(ctx context.Context, call schema.ToolCall) schema.ToolResult {
+		output, err := tool.Execute(ctx, call.Arguments)
+		if err != nil {
+			return schema.ToolResult{
+				ToolCallID: call.ID,
+				Output:     fmt.Sprintf("Error executing %s: %v", call.Name, err),
+				IsError:    true,
+			}
+		}
 		return schema.ToolResult{
 			ToolCallID: call.ID,
-			Output:     errMsg,
-			IsError:    true,
+			Output:     output,
+			IsError:    false,
 		}
 	}
 
-	return schema.ToolResult{
-		ToolCallID: call.ID,
-		Output:     output,
-		IsError:    false,
+	// 从前往后逐层包裹：后挂载的中间件自然成为最外层
+	// middleware[0] 包裹 tool → middleware[1] 包裹 middleware[0] → ...
+	for i := 0; i < len(r.toolMiddlewares); i++ {
+		mw := r.toolMiddlewares[i]
+		inner := handler // 捕获当前 handler
+		handler = func(c context.Context, call schema.ToolCall) schema.ToolResult {
+			return mw(c, call, inner)
+		}
 	}
+
+	return handler
 }

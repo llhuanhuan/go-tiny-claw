@@ -75,6 +75,9 @@ func main() {
 	registry.Register(tools.NewSubagentTool(eng, subRegistry, nil))
 	registry.Register(tools.NewCheckSubagentTool())
 
+	// 4.7 挂载工具执行计时中间件：记录每个工具的真实物理执行耗时
+	registry.UseToolMiddleware(tools.ExecutionTimer())
+
 	// 5. 检测运行模式（优先飞书 > 微信 > 终端）
 	switch {
 	case cfg.Feishu.AppID != "":
