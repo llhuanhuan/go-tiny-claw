@@ -10,8 +10,10 @@ import (
 	"os/signal"
 	"path/filepath"
 
+	ctxpkg "github.com/lhuan/go-tiny-claw/internal/context"
 	"github.com/lhuan/go-tiny-claw/internal/engine"
 	"github.com/lhuan/go-tiny-claw/internal/feishu"
+	"github.com/lhuan/go-tiny-claw/internal/observability"
 	"github.com/lhuan/go-tiny-claw/internal/permissions"
 	"github.com/lhuan/go-tiny-claw/internal/provider"
 	"github.com/lhuan/go-tiny-claw/internal/tools"
@@ -28,7 +30,11 @@ func main() {
 	}
 
 	// 1. 初始化 LLM Provider
-	llmProvider := detectProvider()
+	rawProvider := detectProvider()
+
+	// 1.5 创建计费追踪器：包装原始 Provider，自动记录每次 API 调用的 Token 消耗和成本
+	billingSession := ctxpkg.NewSession("global-billing")
+	llmProvider := observability.NewCostTracker(rawProvider, cfg.Model.Name, billingSession)
 
 	// 2. 初始化动态权限引擎
 	permConfigPath := filepath.Join(workDir, ".claw", "permissions.yaml")

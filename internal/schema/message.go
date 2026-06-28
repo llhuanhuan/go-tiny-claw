@@ -12,10 +12,10 @@ const (
 )
 
 type Message struct {
-	Role       Role       `json:"role"`
-	Content    string     `json:"content"`              // 存放纯文本内容
-	ToolCalls  []ToolCall `json:"tool_calls,omitempty"` // 如果模型决定调用工具，此字段将被填充 (支持并行调用多个工具)
-	ToolCallID string     `json:"tool_call_id,omitempty"`
+	Role       Role        `json:"role"`
+	Content    string      `json:"content"`              // 存放纯文本内容
+	ToolCalls  []ToolCall  `json:"tool_calls,omitempty"` // 如果模型决定调用工具，此字段将被填充 (支持并行调用多个工具)
+	ToolCallID string      `json:"tool_call_id,omitempty"`
 	Usage      *TokenUsage `json:"usage,omitempty"` // API 返回的 Token 消耗（仅 assistant 消息携带）
 }
 
@@ -47,4 +47,10 @@ type ToolDefinition struct {
 	Name        string      `json:"name"`
 	Description string      `json:"description"`
 	InputSchema interface{} `json:"input_schema"` // 对应 JSON Schema
+}
+
+// Usage 记录了单次大模型 API 调用的 Token 消耗
+type Usage struct {
+	PromptTokens     int `json: "prompt_tokens"`     // 输入的 Token 数量
+	CompletionTokens int `json: "completion_tokens"` // 产生的 Token 数量
 }

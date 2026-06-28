@@ -37,8 +37,9 @@ type WechatConfig struct {
 
 // ModelConfig 定义模型相关的配置，用于自适应压缩决策。
 type ModelConfig struct {
-	MaxContextWindow int  `yaml:"max_context_window"` // 模型上下文窗口 Token 数，默认 200000
-	PlanMode         bool `yaml:"plan_mode"`          // 计划模式开关：开启后 Agent 使用 PLAN.md/TODO.md 进行长程任务管理
+	Name             string `yaml:"name"`              // 模型名称，用于计费查找 (如 "glm-4.5-air")
+	MaxContextWindow int    `yaml:"max_context_window"` // 模型上下文窗口 Token 数，默认 200000
+	PlanMode         bool   `yaml:"plan_mode"`          // 计划模式开关：开启后 Agent 使用 PLAN.md/TODO.md 进行长程任务管理
 }
 
 // DefaultConfig 返回一套开箱即用的默认配置。
@@ -49,7 +50,8 @@ func DefaultConfig() *AppConfig {
 			Mode: "debug",
 		},
 		Model: ModelConfig{
-			MaxContextWindow: 200000, // 默认 200k Token（适配 Claude Sonnet）
+			Name:             "glm-4.5-air", // 默认模型，用于计费查找
+			MaxContextWindow: 200000,         // 默认 200k Token（适配 Claude Sonnet）
 		},
 	}
 }

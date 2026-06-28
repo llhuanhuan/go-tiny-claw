@@ -18,6 +18,8 @@ type Session struct {
 	// 存放此 Session 中所有的用户输入、大模型回复和工具调用结果
 	history []schema.Message
 	mu      sync.RWMutex // 读写锁，防止并发读写历史时发生 Data Race
+	// 注意：Token 计费统计已移至 observability.CostTracker + context.Session，
+	// 每次 provider.Generate 调用会自动通过装饰器记录消耗。
 }
 
 func NewSession(id string, workDir string) *Session {
