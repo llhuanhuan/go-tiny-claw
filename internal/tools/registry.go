@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 
+	"github.com/lhuan/go-tiny-claw/internal/observability"
 	"github.com/lhuan/go-tiny-claw/internal/schema"
 )
 
@@ -103,6 +104,13 @@ func (r *registryImpl) UseToolMiddleware(mw ToolMiddlewareFunc) {
 }
 
 func (r *registryImpl) Execute(ctx context.Context, call schema.ToolCall) schema.ToolResult {
+
+	ctx, span := observability.StartSpan(ctx, "Tool.Execute")
+	span.AddAttribute("tool_name", call.Name)
+	// 将 JSON 参数存入以备调试
+	span.AddAttribute("arguments", string(call.Arguments))
+	defer span.EndSpan() // 无论成功失败，确保结束
+
 	// 1. 路由查找：如果在注册表中找不到该工具，这是模型产生了幻觉，直接向模型抛出错误
 	tool, exists := r.tools[call.Name]
 	if !exists {
@@ -132,7 +140,13 @@ func (r *registryImpl) Execute(ctx context.Context, call schema.ToolCall) schema
 	handler := r.buildToolHandler(ctx, tool)
 
 	// 4. 执行整个中间件链
-	return handler(ctx, call)
+	result := handler(ctx, call)
+
+	// 将执行结果的前 100 字符放入 Trace，防止 Trace 文件过度膨胀
+	span.AddAttribute("output_preview", truncate(result.Output, 100))
+	span.AddAttribute("is_error", result.IsError)
+
+	return result
 }
 
 // buildToolHandler 构建环绕式中间件链。
@@ -167,4 +181,11 @@ func (r *registryImpl) buildToolHandler(ctx context.Context, tool BaseTool) Tool
 	}
 
 	return handler
+}
+
+func truncate(s string, max int) string {
+	if len(s) > max {
+		return s[:max] + "..."
+	}
+	return s
 }

@@ -11,6 +11,7 @@ import (
 
 	ctxpkg "github.com/lhuan/go-tiny-claw/internal/context"
 
+	"github.com/lhuan/go-tiny-claw/internal/observability"
 	"github.com/lhuan/go-tiny-claw/internal/provider"
 	"github.com/lhuan/go-tiny-claw/internal/schema"
 	"github.com/lhuan/go-tiny-claw/internal/tools"
@@ -82,6 +83,18 @@ func (e *AgentEngine) SetMaxContextWindow(maxTokens int) {
 func (e *AgentEngine) Run(ctx context.Context, session *Session, userPrompt string, reporter Reporter) error {
 	log.Printf("[Engine] 唤醒会话 [%s]，锁定工作区: %s\n", session.ID, session.WorkDir)
 
+	// 【埋点 1】：开启 Root Span，记录整个任务的生命周期
+	ctx, rootSpan := observability.StartSpan(ctx, "Agent.Run")
+	rootSpan.AddAttribute("SessionID", session.ID)
+	rootSpan.AddAttribute("WorkDir", session.WorkDir)
+
+	// defer 保证在引擎退出时，无论成功失败，都能结束根 Span 并导出 Trace 报告
+	defer func() {
+		rootSpan.EndSpan()
+		_ = observability.ExportTraceToFile(rootSpan, session.WorkDir, session.ID)
+		log.Printf("📊 [Tracing] 本次任务的执行回放链路已保存至工作区的 .claw/traces 目录下\n")
+	}()
+
 	// 将用户输入追加到 Session 历史，确保：
 	// 1. Thinking 阶段至少有一条 User 消息（Anthropic API 强制要求）
 	// 2. 多轮对话时 Working Memory 能正确截取到本轮用户输入
@@ -143,7 +156,12 @@ func (e *AgentEngine) Run(ctx context.Context, session *Session, userPrompt stri
 	// 确保引擎退出时清理所有后台进程
 	defer e.taskManager.Shutdown()
 
+	turnCount := 0
 	for {
+		turnCount++
+		// 【埋点 2】：开启 Turn 子跨度，记录单次 ReAct 循环的生命周期
+		turnCtx, turnSpan := observability.StartSpan(ctx, fmt.Sprintf("Turn-%d", turnCount))
+
 		availableTools := e.registry.GetAvailableTools()
 		// 1. 【上下文组装】: System Prompt + 双维度截取 Working Memory
 		//    - 最多 6 条消息（条数维度）
@@ -184,7 +202,13 @@ func (e *AgentEngine) Run(ctx context.Context, session *Session, userPrompt stri
 		// 2. 【核心注入点】: 在向 Provider 发起推理前，过一遍内存压缩器！
 		//无论你带出了多少上下文，如果字符总数超标，早期日志将被掩码化，超大日志将被掐头去尾
 
+		// 【埋点 5】：记录 Compaction 压缩操作
+		compactCtx, compactSpan := observability.StartSpan(turnCtx, "Compaction")
 		compactedContext := e.compactor.Compact(contextHistory)
+		compactSpan.AddAttribute("input_messages", len(contextHistory))
+		compactSpan.AddAttribute("output_messages", len(compactedContext))
+		compactSpan.EndSpan()
+		_ = compactCtx // Compaction 子跨度仅用于记录，不衍生新的上下文
 
 		// 3. 后续的 Provider.Generate 全面使用被保护过的新鲜上下文 (compactedContext)
 		// 2. ================= Phase 1: Thinking =================
@@ -193,7 +217,11 @@ func (e *AgentEngine) Run(ctx context.Context, session *Session, userPrompt stri
 			if reporter != nil {
 				reporter.OnThinking(ctx)
 			}
-			thinkResp, err := e.provider.Generate(ctx, compactedContext, nil)
+
+			// 【埋点 3】：记录 Thinking 调用
+			thinkCtx, thinkSpan := observability.StartSpan(turnCtx, "LLM.Thinking")
+			thinkResp, err := e.provider.Generate(thinkCtx, compactedContext, nil)
+			thinkSpan.EndSpan() // 结束思考跨度
 			if err != nil {
 				return fmt.Errorf("Thinking 阶段生成失败: %w", err)
 			}
@@ -206,7 +234,11 @@ func (e *AgentEngine) Run(ctx context.Context, session *Session, userPrompt stri
 
 		}
 		// 3. ================= Phase 2: Action =================
-		actionResp, err := e.provider.Generate(ctx, compactedContext, availableTools)
+		// 【埋点 4】：记录 Action 调用
+
+		actCtx, actSpan := observability.StartSpan(turnCtx, "LLM.Action")
+		actionResp, err := e.provider.Generate(actCtx, compactedContext, availableTools)
+		actSpan.EndSpan() // 结束行动跨度
 		if err != nil {
 			return fmt.Errorf("Action 阶段生成失败: %w", err)
 		}
@@ -223,11 +255,12 @@ func (e *AgentEngine) Run(ctx context.Context, session *Session, userPrompt stri
 
 		if len(actionResp.ToolCalls) == 0 {
 			// 如果没有工具调用，说明本次任务已完成，打破 ReAct 循环，挂起等待人类的下一条指令
+			turnSpan.EndSpan() // 结束 Turn 跨度
 			break
 		}
 
 		// 4. ================= 并发执行底层工具 =================
-		lastToolCall, lastResult := e.executeToolsInParallel(ctx, actionResp.ToolCalls, &contextHistory, reporter)
+		lastToolCall, lastResult := e.executeToolsInParallel(turnCtx, actionResp.ToolCalls, &contextHistory, reporter)
 
 		// 将本轮工具执行结果（Observation）持久化到 Session 中
 		observationMsgs := contextHistory[len(contextHistory)-len(actionResp.ToolCalls):]
@@ -243,6 +276,8 @@ func (e *AgentEngine) Run(ctx context.Context, session *Session, userPrompt stri
 			session.Append(*reminderMsg)
 			log.Printf("[Engine] ⚠️ 触发死循环干预！注入修正指令到 Session\n")
 		}
+
+		turnSpan.EndSpan() // 结束 Turn 跨度（进入下一轮前）
 	}
 
 	return nil
@@ -676,6 +711,11 @@ func (e *AgentEngine) RunSub(ctx context.Context, taskPrompt string, readOnlyReg
 			return "", fmt.Errorf("子智能体探索过于深入，超过 %d 轮被强制召回，请主 Agent 给它更明确的指令", maxSubTurns)
 		}
 
+		// 【埋点 2】：记录单次 Turn 循环
+		turnCtx, turnSpan := observability.StartSpan(ctx, fmt.Sprintf("Turn-%d", turnCount))
+
+		defer turnSpan.EndSpan() // 利用 defer，哪怕遇到了 break 或 error 也会计算耗时
+
 		// 【驾驭底线】：子智能体仅能获取传入的只读工具注册表
 		availableTools := readOnlyRegistry.GetAvailableTools()
 
@@ -711,7 +751,7 @@ func (e *AgentEngine) RunSub(ctx context.Context, taskPrompt string, readOnlyReg
 					r.OnToolCall(ctx, fmt.Sprintf("[Subagent] %s", call.Name), string(call.Arguments))
 				}
 
-				result := readOnlyRegistry.Execute(ctx, call)
+				result := readOnlyRegistry.Execute(turnCtx, call)
 
 				finalOutput := result.Output
 				if result.IsError {
