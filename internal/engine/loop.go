@@ -202,13 +202,9 @@ func (e *AgentEngine) Run(ctx context.Context, session *Session, userPrompt stri
 		// 2. 【核心注入点】: 在向 Provider 发起推理前，过一遍内存压缩器！
 		//无论你带出了多少上下文，如果字符总数超标，早期日志将被掩码化，超大日志将被掐头去尾
 
-		// 【埋点 5】：记录 Compaction 压缩操作
-		compactCtx, compactSpan := observability.StartSpan(turnCtx, "Compaction")
+		// 2. 【核心注入点】: 在向 Provider 发起推理前，过一遍内存压缩器！
 		compactedContext := e.compactor.Compact(contextHistory)
-		compactSpan.AddAttribute("input_messages", len(contextHistory))
-		compactSpan.AddAttribute("output_messages", len(compactedContext))
-		compactSpan.EndSpan()
-		_ = compactCtx // Compaction 子跨度仅用于记录，不衍生新的上下文
+		turnSpan.AddAttribute("context_message_count", len(compactedContext))
 
 		// 3. 后续的 Provider.Generate 全面使用被保护过的新鲜上下文 (compactedContext)
 		// 2. ================= Phase 1: Thinking =================

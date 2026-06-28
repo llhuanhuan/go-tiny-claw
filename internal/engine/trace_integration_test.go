@@ -188,20 +188,11 @@ func TestTrace_SingleTurn_Structure(t *testing.T) {
 	turn := turns[0]
 	t.Logf("  ✅ Turn-1: Duration=%dms, Children=%d", turn.DurationMs, len(turn.Children))
 
-	// 4. Turn-1 下必须有 Compaction
-	compSpans := findChildrenByName(turn, "Compaction")
-	if len(compSpans) < 1 {
-		t.Fatal("Turn-1 下缺少 Compaction Span")
+	// 4. Turn-1 必须有 context_message_count 属性
+	if turn.Attributes["context_message_count"] == nil {
+		t.Fatal("Turn-1 缺少 context_message_count 属性")
 	}
-	comp := compSpans[0]
-	if comp.Attributes["input_messages"] == nil {
-		t.Fatal("Compaction 缺少 input_messages 属性")
-	}
-	if comp.Attributes["output_messages"] == nil {
-		t.Fatal("Compaction 缺少 output_messages 属性")
-	}
-	t.Logf("  ✅ Compaction: input=%v → output=%v | %dms",
-		comp.Attributes["input_messages"], comp.Attributes["output_messages"], comp.DurationMs)
+	t.Logf("  ✅ context_message_count=%v", turn.Attributes["context_message_count"])
 
 	// 5. Turn-1 下必须有 LLM.Action
 	actionSpans := findChildrenByName(turn, "LLM.Action")
@@ -308,13 +299,13 @@ func TestTrace_WithThinking(t *testing.T) {
 	childNames := findDirectChildrenNames(turn)
 	t.Logf("  Turn-1 子节点: %v", childNames)
 
-	// 验证三个叶子 Span 都存在
-	compSpans := findChildrenByName(turn, "Compaction")
-	if len(compSpans) < 1 {
-		t.Fatal("缺少 Compaction Span")
+	// 验证 context_message_count 属性
+	if turn.Attributes["context_message_count"] == nil {
+		t.Fatal("Turn-1 缺少 context_message_count 属性")
 	}
-	t.Logf("  ✅ Compaction: %dms", compSpans[0].DurationMs)
+	t.Logf("  ✅ context_message_count=%v", turn.Attributes["context_message_count"])
 
+	// 验证 LLM.Thinking 和 LLM.Action 都存在
 	thinkSpans := findChildrenByName(turn, "LLM.Thinking")
 	if len(thinkSpans) < 1 {
 		t.Fatal("缺少 LLM.Thinking Span（Thinking 已开启）")
@@ -366,16 +357,16 @@ func TestTrace_MultipleTurns(t *testing.T) {
 		t.Fatal("至少应有 1 个 Turn Span")
 	}
 
-	// 验证每个 Turn 都有 Compaction
+	// 验证每个 Turn 都有 context_message_count 属性
 	for _, child := range root.Children {
 		if !strings.HasPrefix(child.Name, "Turn-") {
 			continue
 		}
-		compSpans := findChildrenByName(child, "Compaction")
-		if len(compSpans) < 1 {
-			t.Errorf("%s 缺少 Compaction Span", child.Name)
+		if child.Attributes["context_message_count"] == nil {
+			t.Errorf("%s 缺少 context_message_count 属性", child.Name)
 		}
-		t.Logf("  ✅ %s: %dms, %d children", child.Name, child.DurationMs, len(child.Children))
+		t.Logf("  ✅ %s: %dms, context_messages=%v, %d children",
+			child.Name, child.DurationMs, child.Attributes["context_message_count"], len(child.Children))
 	}
 
 	// 验证 Turn 编号连续
