@@ -267,6 +267,18 @@ func (p *ClaudeProvider) StreamGenerate(
 				// signature_delta / citations_delta 是协议内部细节，忽略
 				}
 
+			case anthropic.MessageDeltaEvent:
+				// 捕获最终 Usage 数据（OutputTokens 在 MessageDelta 中返回）
+				if ev.Usage.OutputTokens > 0 {
+					ch <- StreamEvent{
+						Type: StreamEventUsage,
+						Usage: &schema.TokenUsage{
+							CompletionTokens: int(ev.Usage.OutputTokens),
+							TotalTokens:      int(ev.Usage.OutputTokens),
+						},
+					}
+				}
+
 			case anthropic.MessageStopEvent:
 				// 消息结束，标记完成
 				ch <- StreamEvent{Type: StreamEventDone}

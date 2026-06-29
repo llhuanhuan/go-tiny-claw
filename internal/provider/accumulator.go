@@ -55,7 +55,14 @@ func (a *StreamAccumulator) Ingest(ev StreamEvent) {
 		}
 
 	case StreamEventUsage:
-		a.usage = ev.Usage
+		if a.usage == nil {
+			a.usage = ev.Usage
+		} else {
+			// 合并多次 Usage 事件（Anthropic 流式 API 分 MessageStart 和 MessageDelta 两段返回）
+			a.usage.PromptTokens += ev.Usage.PromptTokens
+			a.usage.CompletionTokens += ev.Usage.CompletionTokens
+			a.usage.TotalTokens += ev.Usage.TotalTokens
+		}
 	}
 }
 
