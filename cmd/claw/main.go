@@ -83,8 +83,18 @@ func main() {
 	// 4.8 注入计费 Session 到引擎，启用试错成本指标
 	eng.SetBillingSession(billingSession)
 
-	// 5. 检测运行模式（优先飞书 > 微信 > 终端）
+	// 5. 解析 CLI 参数（-prompt 存在时强制终端模式，优先于飞书/微信）
+	promptPtr := flag.String("prompt", "", "要交给 Agent 执行的任务描述")
+	workDirPtr := flag.String("dir", ".", "Agent 运行的工作区目录路径 (默认为当前目录)")
+	sessionPtr := flag.String("session", "cli_default_session", "指定会话 ID，支持断点续传")
+	flag.Parse()
+
+	// 6. 检测运行模式（CLI -prompt > 飞书 > 微信 > 终端交互）
 	switch {
+	case *promptPtr != "":
+		// CLI 模式：有 -prompt 参数时强制走终端，忽略飞书/微信配置
+		runTerminal(eng, billingSession, *promptPtr, *workDirPtr, *sessionPtr)
+
 	case cfg.Feishu.AppID != "":
 		runFeishu(eng, cfg)
 
@@ -92,7 +102,8 @@ func main() {
 		runWechat(eng, cfg)
 
 	default:
-		runTerminal(eng, billingSession)
+		// 无 -prompt 且无飞书/微信：交互式终端
+		runTerminal(eng, billingSession, "", ".", "cli_default_session")
 	}
 }
 
@@ -180,21 +191,22 @@ func runWechat(eng *engine.AgentEngine, cfg *AppConfig) {
 	}
 }
 
-// runTerminal 终端 CLI 模式，支持 -prompt / -dir / -session 命令行参数。
-func runTerminal(eng *engine.AgentEngine, billingSession *ctxpkg.Session) {
-	promptPtr := flag.String("prompt", "", "要交给 Agent 执行的任务描述")
-	workDirPtr := flag.String("dir", ".", "Agent 运行的工作区目录路径 (默认为当前目录)")
-	sessionPtr := flag.String("session", "cli_default_session", "指定会话 ID，支持断点续传")
-	flag.Parse()
-
-	if *promptPtr == "" {
-		fmt.Println("用法: go-tiny-claw -prompt \"你的任务描述\" [-dir /path/to/workdir] [-session session_id]")
-		os.Exit(1)
-	}
-
-	workDir, err := filepath.Abs(*workDirPtr)
+// runTerminal 终端 CLI 模式。
+// prompt 为空时进入交互式单次输入，非空时直接执行。
+func runTerminal(eng *engine.AgentEngine, billingSession *ctxpkg.Session, prompt, dir, sessionID string) {
+	workDir, err := filepath.Abs(dir)
 	if err != nil {
 		log.Fatalf("解析工作区路径失败: %v", err)
+	}
+
+	// 交互式：无 prompt 时提示用户输入
+	if prompt == "" {
+		fmt.Print("请输入任务描述: ")
+		fmt.Scanln(&prompt)
+		if prompt == "" {
+			fmt.Println("未输入任务，退出。")
+			return
+		}
 	}
 
 	fmt.Println("==================================================")
@@ -203,12 +215,12 @@ func runTerminal(eng *engine.AgentEngine, billingSession *ctxpkg.Session) {
 	fmt.Println("==================================================")
 
 	reporter := engine.NewTerminalReporter()
-	session := engine.GlobalSessionMgr.GetOrCreate(*sessionPtr, workDir)
+	session := engine.GlobalSessionMgr.GetOrCreate(sessionID, workDir)
 
-	log.Printf("[Bootstrap] 终端模式启动，Prompt: %s\n", *promptPtr)
+	log.Printf("[Bootstrap] 终端模式启动，Prompt: %s\n", prompt)
 	startTime := time.Now()
 
-	if err := eng.Run(context.Background(), session, *promptPtr, reporter); err != nil {
+	if err := eng.Run(context.Background(), session, prompt, reporter); err != nil {
 		log.Fatalf("引擎运行崩溃: %v", err)
 	}
 
