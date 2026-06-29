@@ -3,12 +3,14 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"flag"
 	"fmt"
 	"log"
 	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
+	"time"
 
 	ctxpkg "github.com/lhuan/go-tiny-claw/internal/context"
 	"github.com/lhuan/go-tiny-claw/internal/engine"
@@ -78,6 +80,9 @@ func main() {
 	// 4.7 挂载工具执行计时中间件：记录每个工具的真实物理执行耗时
 	registry.UseToolMiddleware(tools.ExecutionTimer())
 
+	// 4.8 注入计费 Session 到引擎，启用试错成本指标
+	eng.SetBillingSession(billingSession)
+
 	// 5. 检测运行模式（优先飞书 > 微信 > 终端）
 	switch {
 	case cfg.Feishu.AppID != "":
@@ -87,7 +92,7 @@ func main() {
 		runWechat(eng, cfg)
 
 	default:
-		runTerminal(eng)
+		runTerminal(eng, billingSession)
 	}
 }
 
@@ -175,19 +180,42 @@ func runWechat(eng *engine.AgentEngine, cfg *AppConfig) {
 	}
 }
 
-// runTerminal 终端 CLI 模式。
-func runTerminal(eng *engine.AgentEngine) {
-	reporter := engine.NewTerminalReporter()
+// runTerminal 终端 CLI 模式，支持 -prompt / -dir / -session 命令行参数。
+func runTerminal(eng *engine.AgentEngine, billingSession *ctxpkg.Session) {
+	promptPtr := flag.String("prompt", "", "要交给 Agent 执行的任务描述")
+	workDirPtr := flag.String("dir", ".", "Agent 运行的工作区目录路径 (默认为当前目录)")
+	sessionPtr := flag.String("session", "cli_default_session", "指定会话 ID，支持断点续传")
+	flag.Parse()
 
-	prompt := "Hello, go-tiny-claw! 请用一句话介绍你自己。"
-	if len(os.Args) > 1 {
-		prompt = os.Args[1]
+	if *promptPtr == "" {
+		fmt.Println("用法: go-tiny-claw -prompt \"你的任务描述\" [-dir /path/to/workdir] [-session session_id]")
+		os.Exit(1)
 	}
 
-	log.Printf("[Bootstrap] 终端模式启动，Prompt: %s\n", prompt)
-	session := engine.GlobalSessionMgr.GetOrCreate("terminal", eng.WorkDir)
-	if err := eng.Run(context.Background(), session, prompt, reporter); err != nil {
+	workDir, err := filepath.Abs(*workDirPtr)
+	if err != nil {
+		log.Fatalf("解析工作区路径失败: %v", err)
+	}
+
+	fmt.Println("==================================================")
+	fmt.Printf("🚀 启动 go-tiny-claw CLI 引擎...\n")
+	fmt.Printf("📁 锁定工作区: %s\n", workDir)
+	fmt.Println("==================================================")
+
+	reporter := engine.NewTerminalReporter()
+	session := engine.GlobalSessionMgr.GetOrCreate(*sessionPtr, workDir)
+
+	log.Printf("[Bootstrap] 终端模式启动，Prompt: %s\n", *promptPtr)
+	startTime := time.Now()
+
+	if err := eng.Run(context.Background(), session, *promptPtr, reporter); err != nil {
 		log.Fatalf("引擎运行崩溃: %v", err)
 	}
-	log.Println("[Bootstrap] Agent 任务执行完毕。")
+
+	elapsed := time.Since(startTime)
+	fmt.Println("\n==================================================")
+	fmt.Printf("✨ 任务圆满结束。总耗时: %v\n", elapsed)
+	fmt.Printf("💰 Session 累计消耗: $%.6f | Token: Input %d, Output %d\n",
+		billingSession.TotalCostCNY, billingSession.TotalPromptTokens, billingSession.TotalCompletionTokens)
+	fmt.Println("==================================================")
 }
