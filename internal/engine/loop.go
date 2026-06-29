@@ -103,6 +103,12 @@ func (e *AgentEngine) SetMaxContextWindow(maxTokens int) {
 	e.compactor.MaxWindowTokens = maxTokens
 }
 
+// SetBotName 设置机器人名称，注入到 System Prompt 的身份声明中。
+// 应在引擎创建后、运行前调用。为空时使用默认名称。
+func (e *AgentEngine) SetBotName(name string) {
+	e.composer.SetBotName(name)
+}
+
 // Run 启动 Agent 的生命周期。
 //
 // reporter 是引擎向外界汇报状态的唯一出口。传入 nil 时引擎将静默运行

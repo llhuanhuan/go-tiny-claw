@@ -235,7 +235,8 @@ func (c *Compactor) estimateLength(msgs []schema.Message) int {
 type PromptComposer struct {
 	workDir     string
 	skillLoader *SkillLoader
-	planMode    bool // 【新增】计划模式开关
+	planMode    bool   // 【新增】计划模式开关
+	botName     string // 机器人名称（从飞书 API 自动获取，为空时使用默认名）
 }
 
 func NewPromptComposer(workDir string, planMode ...bool) *PromptComposer {
@@ -261,6 +262,11 @@ func (c *PromptComposer) SetPlanMode(enabled bool) {
 	c.planMode = enabled
 }
 
+// SetBotName 设置机器人名称，用于 System Prompt 中的身份声明。
+func (c *PromptComposer) SetBotName(name string) {
+	c.botName = name
+}
+
 // Build 组装并返回一条完整的 RoleSystem 消息。
 //
 // 三段式结构：
@@ -274,9 +280,22 @@ func (c *PromptComposer) Build() schema.Message {
 	// 1. 极简内核 (Minimal Core)
 	//    仅确立基本身份与最底线的红线纪律
 	// ═══════════════════════════════════════════════════════════════
-	promptBuilder.WriteString(`# 核心身份
-你名叫 go-tiny-claw，一个由驾驭工程驱动的骨灰级研发助手。
+	// 动态机器人名称：优先使用外部注入的名称，否则使用默认值
+	botName := c.botName
+	if botName == "" {
+		botName = "ai-tiny"
+	}
+
+	promptBuilder.WriteString(fmt.Sprintf(`# 核心身份
+你名叫 %s，一个由驾驭工程驱动的骨灰级研发助手。
 你具备极简主义哲学，拒绝废话。你能通过系统提供的内置工具，创建、读取、修改和执行工作区中的代码。
+
+# 对话场景判断 (CRITICAL)
+在执行任何操作之前，你必须先判断用户消息的意图：
+1. **日常闲聊/打招呼**（如"你好"、"在吗"、"你是谁"、"今天天气怎么样"等）：直接用自然语言回复，**禁止调用任何工具**。不要搜索文件、不要读代码、不要执行命令。
+2. **代码/技术任务**（如"帮我写个函数"、"修复这个bug"、"查看某个文件"等）：才使用工具执行。
+3. **不确定时**：先用一句话询问用户具体需求，而不是自动开始执行工具。
+记住：你是助手，不只是代码执行器。聊天时请像朋友一样自然交流。
 
 # 核心纪律 (CRITICAL)
 1. 如需检查文件是否存在，请使用 bash 的 ls 或 test -f，而不是对目录使用 read_file。
@@ -285,7 +304,7 @@ func (c *PromptComposer) Build() schema.Message {
 4. 无论何时你需要写代码或创建文件，都要直接使用 write_file 工具。
 5. 遇到工具执行报错时，仔细阅读 stderr，尝试自己修正命令并重试。
 6. 始终用中文回复，以便传达你的进展和想法。
-`)
+`, botName))
 
 	if c.planMode {
 		// 【核心重构】：引入状态嗅探与断点续传的条件分支逻辑

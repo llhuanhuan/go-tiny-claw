@@ -23,6 +23,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"net/http"
 	"os"
 	"strings"
 	"time"
@@ -72,6 +73,7 @@ type FeishuBot struct {
 	workDir   string              // 工作区路径
 	factory   AgentEngineFactory  // 工厂模式：per-session 创建引擎
 	wsClient  *larkws.Client      // WebSocket 长连接客户端
+	botName   string              // 机器人名称（从飞书 API 自动获取）
 }
 
 // NewFeishuBot 创建一个基于长连接的飞书 Bot（工厂模式）。
@@ -94,6 +96,9 @@ func NewFeishuBot(factory AgentEngineFactory, workDir string, appID, appSecret s
 		workDir:   workDir,
 		factory:   factory,
 	}
+
+	// 启动时自动获取机器人名称
+	bot.fetchBotName()
 
 	// 从环境变量读取加密配置（生产环境必须设置）
 	encryptKey := os.Getenv("FEISHU_ENCRYPT_KEY")
@@ -203,6 +208,10 @@ func (b *FeishuBot) runAgent(chatID string, prompt string) {
 
 	// 2. 通过工厂模式，为当前会话生成一个挂好了专属 CostTracker 的新引擎
 	eng := b.factory(session)
+	// 注入机器人名称到 System Prompt
+	if b.botName != "" {
+		eng.SetBotName(b.botName)
+	}
 
 	// 3. 将专属的 Reporter 塞入 Context，供底层 Middleware 提取
 	runCtx := ContextWithReporter(ctx, reporter)
@@ -268,6 +277,73 @@ func (r *FeishuReporter) OnMessage(ctx context.Context, content string) {
 }
 
 var _ engine.Reporter = (*FeishuReporter)(nil)
+
+// =============================================================================
+// 机器人信息获取
+// =============================================================================
+
+// fetchBotName 通过飞书 API 获取机器人自身名称，用于 System Prompt 身份声明。
+// 使用 tenant_access_token 调用 GET /open-apis/bot/v3/info/ 接口。
+func (b *FeishuBot) fetchBotName() {
+	// 1. 获取 tenant_access_token
+	tokenURL := "https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal"
+	tokenBody := fmt.Sprintf(`{"app_id":"%s","app_secret":"%s"}`, b.appID, b.appSecret)
+
+	tokenResp, err := http.Post(tokenURL, "application/json", strings.NewReader(tokenBody))
+	if err != nil {
+		log.Printf("[Feishu] ⚠️ 获取 tenant_access_token 失败: %v", err)
+		return
+	}
+	defer tokenResp.Body.Close()
+
+	var tokenResult struct {
+		Code              int    `json:"code"`
+		Msg               string `json:"msg"`
+		TenantAccessToken string `json:"tenant_access_token"`
+	}
+	if err := json.NewDecoder(tokenResp.Body).Decode(&tokenResult); err != nil {
+		log.Printf("[Feishu] ⚠️ 解析 token 响应失败: %v", err)
+		return
+	}
+	if tokenResult.Code != 0 || tokenResult.TenantAccessToken == "" {
+		log.Printf("[Feishu] ⚠️ 获取 token 失败: code=%d, msg=%s", tokenResult.Code, tokenResult.Msg)
+		return
+	}
+
+	// 2. 调用 bot info 接口
+	botInfoURL := "https://open.feishu.cn/open-apis/bot/v3/info/"
+	req, _ := http.NewRequest("GET", botInfoURL, nil)
+	req.Header.Set("Authorization", "Bearer "+tokenResult.TenantAccessToken)
+
+	botResp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		log.Printf("[Feishu] ⚠️ 获取机器人信息失败: %v", err)
+		return
+	}
+	defer botResp.Body.Close()
+
+	var botResult struct {
+		Code int    `json:"code"`
+		Msg  string `json:"msg"`
+		Bot  struct {
+			OpenID string `json:"open_id"`
+			Name   string `json:"app_name"`
+		} `json:"bot"`
+	}
+	if err := json.NewDecoder(botResp.Body).Decode(&botResult); err != nil {
+		log.Printf("[Feishu] ⚠️ 解析机器人信息失败: %v", err)
+		return
+	}
+	if botResult.Code != 0 {
+		log.Printf("[Feishu] ⚠️ 获取机器人信息失败: code=%d, msg=%s", botResult.Code, botResult.Msg)
+		return
+	}
+
+	if botResult.Bot.Name != "" {
+		b.botName = botResult.Bot.Name
+		log.Printf("[Feishu] 🤖 机器人名称: %s", b.botName)
+	}
+}
 
 // =============================================================================
 // 消息文本提取
