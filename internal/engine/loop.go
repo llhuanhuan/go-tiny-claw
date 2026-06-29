@@ -139,9 +139,9 @@ func (e *AgentEngine) Run(ctx context.Context, session *Session, userPrompt stri
 	session.Append(schema.Message{Role: schema.RoleUser, Content: userPrompt})
 
 	// 根据当前 Session 的工作区，动态组装最新的 System Prompt
-	composer := ctxpkg.NewPromptComposer(session.WorkDir, e.PlanMode)
-	// 【核心修改】动态组装 System Prompt，彻底替换掉以前硬编码的面条提示词！
-	systemMsg := composer.Build()
+	// 复用引擎持有的 composer 实例，保留外部注入的 botName 等配置
+	e.composer.SetPlanMode(e.PlanMode)
+	systemMsg := e.composer.Build()
 
 	// ═══════════════════════════════════════════════════════════════
 	// Plan Mode: 引擎级强制注入 (Engine-Level Enforcement)
@@ -288,8 +288,13 @@ func (e *AgentEngine) Run(ctx context.Context, session *Session, userPrompt stri
 
 		compactedContext = append(compactedContext, *actionResp)
 
-		if actionResp.Content != "" && reporter != nil {
-			reporter.OnMessage(ctx, actionResp.Content)
+		if reporter != nil {
+			if actionResp.Content != "" {
+				reporter.OnMessage(ctx, actionResp.Content)
+			} else if len(actionResp.ToolCalls) == 0 {
+				// 模型返回了空内容且没有工具调用 — 可能是 thinking-only 响应
+				reporter.OnMessage(ctx, "（模型未生成可见回复）")
+			}
 		}
 
 		if len(actionResp.ToolCalls) == 0 {
