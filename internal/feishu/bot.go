@@ -23,6 +23,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"os"
 	"strings"
 	"time"
 
@@ -35,19 +36,48 @@ import (
 	"github.com/lhuan/go-tiny-claw/internal/engine"
 )
 
+// =============================================================================
+// 1. Context 传递机制：解决并发 Reporter 的提取
+// =============================================================================
+
+// reporterKey 定义 Context 中存放 Reporter 的专属键
+type reporterKey struct{}
+
+// ContextWithReporter 将专属的 Reporter 封入上下文，供底层 Middleware 提取
+func ContextWithReporter(ctx context.Context, r engine.Reporter) context.Context {
+	return context.WithValue(ctx, reporterKey{}, r)
+}
+
+// ReporterFromContext 供底层的 Middleware 提取专属的 Reporter（如审批卡片推送）
+func ReporterFromContext(ctx context.Context) engine.Reporter {
+	if r, ok := ctx.Value(reporterKey{}).(engine.Reporter); ok {
+		return r
+	}
+	return nil
+}
+
+// =============================================================================
+// 2. 飞书 Bot 核心调度器
+// =============================================================================
+
+// AgentEngineFactory 允许每次收到消息时，根据 Session 动态创建引擎实例，
+// 实现 per-session 的计费隔离（CostTracker 物理隔离）。
+type AgentEngineFactory func(session *engine.Session) *engine.AgentEngine
+
 // FeishuBot 封装飞书机器人的长连接配置与核心业务流。
 type FeishuBot struct {
 	client    *lark.Client // API 客户端（用于发送消息）
 	appID     string
 	appSecret string
-	engine    *engine.AgentEngine
-	wsClient  *larkws.Client  // WebSocket 长连接客户端
-	r         *FeishuReporter // 新增实现Reporter接口的FeishuReporter实例
+	workDir   string              // 工作区路径
+	factory   AgentEngineFactory  // 工厂模式：per-session 创建引擎
+	wsClient  *larkws.Client      // WebSocket 长连接客户端
 }
 
-// NewFeishuBot 创建一个基于长连接的飞书 Bot。
+// NewFeishuBot 创建一个基于长连接的飞书 Bot（工厂模式）。
+// factory 在每次收到消息时为当前会话动态创建引擎实例，实现 per-session 计费隔离。
 // appID 和 appSecret 由调用方从配置中获取后传入。
-func NewFeishuBot(eng *engine.AgentEngine, appID, appSecret string) *FeishuBot {
+func NewFeishuBot(factory AgentEngineFactory, workDir string, appID, appSecret string) *FeishuBot {
 	if appID == "" || appSecret == "" {
 		log.Fatal("飞书配置缺失：app_id 和 app_secret 不能为空")
 	}
@@ -61,13 +91,19 @@ func NewFeishuBot(eng *engine.AgentEngine, appID, appSecret string) *FeishuBot {
 		client:    client,
 		appID:     appID,
 		appSecret: appSecret,
-		engine:    eng,
+		workDir:   workDir,
+		factory:   factory,
 	}
 
+	// 从环境变量读取加密配置（生产环境必须设置）
+	encryptKey := os.Getenv("FEISHU_ENCRYPT_KEY")
+	verifyToken := os.Getenv("FEISHU_VERIFY_TOKEN")
+
 	// 构建事件分发器，注册消息接收处理函数
-	eventHandler := dispatcher.NewEventDispatcher("", "").
+	eventHandler := dispatcher.NewEventDispatcher(verifyToken, encryptKey).
 		OnP2MessageReceiveV1(bot.onMessageReceived).
-		OnP2ChatAccessEventBotP2pChatEnteredV1(bot.onChatEntered)
+		OnP2ChatAccessEventBotP2pChatEnteredV1(bot.onChatEntered).
+		OnP2MessageReadV1(bot.onMessageRead)
 
 	// 构建 WebSocket 长连接客户端
 	bot.wsClient = larkws.NewClient(appID, appSecret,
@@ -111,6 +147,11 @@ func safeStrDeref(s *string) string {
 	return *s
 }
 
+// onMessageRead 处理消息已读事件，静默忽略。
+func (b *FeishuBot) onMessageRead(ctx context.Context, event *larkim.P2MessageReadV1) error {
+	return nil
+}
+
 // onMessageReceived 处理飞书推送的消息事件。
 // 必须在 3 秒内返回（飞书超时限制），因此将 Agent 任务丢到 goroutine 异步执行。
 func (b *FeishuBot) onMessageReceived(ctx context.Context, event *larkim.P2MessageReceiveV1) error {
@@ -146,6 +187,7 @@ func (b *FeishuBot) onMessageReceived(ctx context.Context, event *larkim.P2Messa
 }
 
 // runAgent 在独立 goroutine 中运行 Agent 任务。
+// 通过工厂模式为当前会话创建专属引擎，并将 Reporter 注入 Context。
 func (b *FeishuBot) runAgent(chatID string, prompt string) {
 	reporter := &FeishuReporter{
 		client: b.client,
@@ -156,8 +198,16 @@ func (b *FeishuBot) runAgent(chatID string, prompt string) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
 
-	session := engine.GlobalSessionMgr.GetOrCreate("feishu:"+chatID, b.engine.WorkDir)
-	if err := b.engine.Run(ctx, session, prompt, reporter); err != nil {
+	// 1. 获取物理隔离的 Session
+	session := engine.GlobalSessionMgr.GetOrCreate("feishu:"+chatID, b.workDir)
+
+	// 2. 通过工厂模式，为当前会话生成一个挂好了专属 CostTracker 的新引擎
+	eng := b.factory(session)
+
+	// 3. 将专属的 Reporter 塞入 Context，供底层 Middleware 提取
+	runCtx := ContextWithReporter(ctx, reporter)
+
+	if err := eng.Run(runCtx, session, prompt, reporter); err != nil {
 		reporter.sendMsg(fmt.Sprintf("❌ Agent 运行失败: %v", err))
 	}
 }

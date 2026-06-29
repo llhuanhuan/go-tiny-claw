@@ -96,7 +96,7 @@ func main() {
 		runTerminal(eng, billingSession, *promptPtr, *workDirPtr, *sessionPtr)
 
 	case cfg.Feishu.AppID != "":
-		runFeishu(eng, cfg)
+		runFeishu(eng, billingSession, cfg)
 
 	case cfg.Wechat.WebhookURL != "":
 		runWechat(eng, cfg)
@@ -154,8 +154,21 @@ func loadClaudeCodeEnv() {
 }
 
 // runFeishu 通过 WebSocket 长连接接入飞书。
-func runFeishu(eng *engine.AgentEngine, cfg *AppConfig) {
-	bot := feishu.NewFeishuBot(eng, cfg.Feishu.AppID, cfg.Feishu.AppSecret)
+// 使用工厂模式：每个飞书会话动态创建独立的引擎实例，实现 per-session 计费隔离。
+func runFeishu(eng *engine.AgentEngine, billingSession *ctxpkg.Session, cfg *AppConfig) {
+	workDir, _ := os.Getwd()
+
+	// 工厂闭包：捕获共享依赖，为每个 Session 创建独立引擎
+	factory := feishu.AgentEngineFactory(func(sess *engine.Session) *engine.AgentEngine {
+		e := engine.NewAgentEngine(eng.Provider(), eng.Registry(), workDir, true, cfg.Model.PlanMode)
+		e.SetMaxContextWindow(cfg.Model.MaxContextWindow)
+		// 为每个会话创建独立的计费 Session，实现 per-session 计费隔离
+		billing := ctxpkg.NewSession("feishu:" + sess.ID)
+		e.SetBillingSession(billing)
+		return e
+	})
+
+	bot := feishu.NewFeishuBot(factory, workDir, cfg.Feishu.AppID, cfg.Feishu.AppSecret)
 
 	// 监听 Ctrl+C 优雅退出
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)

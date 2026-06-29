@@ -70,6 +70,16 @@ func NewAgentEngine(p provider.LLMProvider, r tools.Registry, workDir string, en
 	}
 }
 
+// Provider 返回引擎底层的 LLM Provider，供工厂模式创建新引擎时复用。
+func (e *AgentEngine) Provider() provider.LLMProvider {
+	return e.provider
+}
+
+// Registry 返回引擎底层的工具注册表，供工厂模式创建新引擎时复用。
+func (e *AgentEngine) Registry() tools.Registry {
+	return e.registry
+}
+
 // SetBillingSession 将计费 Session 注入引擎，用于按 Turn 快照 token 消耗。
 // 应在 Run() 之前调用。
 func (e *AgentEngine) SetBillingSession(s *ctxpkg.Session) {
