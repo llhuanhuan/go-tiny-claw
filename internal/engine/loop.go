@@ -44,6 +44,12 @@ type AgentEngine struct {
 	PlanMode  bool                    // 暴露给外部的计划模式开关
 	recovery  *ctxpkg.RecoveryManager // 自愈管理器
 	injector  *ReminderInjector       // 提醒注入器
+
+	// 跑分指标：试错成本度量
+	billingSession  *ctxpkg.Session // 指向计费 Session，用于按 Turn 快照 token 消耗
+	totalTurns      int             // 总 Turn 数
+	errorTurns      int             // 触发过 RecoveryManager 的 Turn 数
+	recoveryTokens  int             // 错误 Turn 累计消耗的 token 数
 }
 
 func NewAgentEngine(p provider.LLMProvider, r tools.Registry, workDir string, enableThinking bool, planMode bool) *AgentEngine {
@@ -64,6 +70,17 @@ func NewAgentEngine(p provider.LLMProvider, r tools.Registry, workDir string, en
 	}
 }
 
+// SetBillingSession 将计费 Session 注入引擎，用于按 Turn 快照 token 消耗。
+// 应在 Run() 之前调用。
+func (e *AgentEngine) SetBillingSession(s *ctxpkg.Session) {
+	e.billingSession = s
+}
+
+// Metrics 返回本次 Run() 的试错成本指标。
+func (e *AgentEngine) Metrics() (totalTurns, errorTurns, recoveryTokens int) {
+	return e.totalTurns, e.errorTurns, e.recoveryTokens
+}
+
 // SkillLoader 返回引擎内部 Composer 持有的 SkillLoader 引用，
 // 供外部注册 read_skill 工具使用（渐进式暴露架构）。
 func (e *AgentEngine) SkillLoader() *ctxpkg.SkillLoader {
@@ -82,6 +99,11 @@ func (e *AgentEngine) SetMaxContextWindow(maxTokens int) {
 // （仅保留 log.Printf 级别的内部日志）。
 func (e *AgentEngine) Run(ctx context.Context, session *Session, userPrompt string, reporter Reporter) error {
 	log.Printf("[Engine] 唤醒会话 [%s]，锁定工作区: %s\n", session.ID, session.WorkDir)
+
+	// 重置跑分指标，确保引擎复用时不会泄漏上次 Run() 的数据
+	e.totalTurns = 0
+	e.errorTurns = 0
+	e.recoveryTokens = 0
 
 	// 【埋点 1】：开启 Root Span，记录整个任务的生命周期
 	ctx, rootSpan := observability.StartSpan(ctx, "Agent.Run")
@@ -159,6 +181,11 @@ func (e *AgentEngine) Run(ctx context.Context, session *Session, userPrompt stri
 	turnCount := 0
 	for {
 		turnCount++
+		// 【试错成本】快照本轮开始前的累计 Token 数，用于计算错误 Turn 的 Token 浪费
+		turnStartTokens := 0
+		if e.billingSession != nil {
+			turnStartTokens = e.billingSession.TotalTokens()
+		}
 		// 【埋点 2】：开启 Turn 子跨度，记录单次 ReAct 循环的生命周期
 		turnCtx, turnSpan := observability.StartSpan(ctx, fmt.Sprintf("Turn-%d", turnCount))
 
@@ -256,7 +283,16 @@ func (e *AgentEngine) Run(ctx context.Context, session *Session, userPrompt stri
 		}
 
 		// 4. ================= 并发执行底层工具 =================
-		lastToolCall, lastResult := e.executeToolsInParallel(turnCtx, actionResp.ToolCalls, &contextHistory, reporter)
+		lastToolCall, lastResult, hasToolError := e.executeToolsInParallel(turnCtx, actionResp.ToolCalls, &contextHistory, reporter)
+
+		// 【试错成本】如果本轮有工具触发错误，累计错误 Turn 数和恢复 Token 消耗
+		if hasToolError {
+			e.errorTurns++
+			if e.billingSession != nil {
+				turnEndTokens := e.billingSession.TotalTokens()
+				e.recoveryTokens += turnEndTokens - turnStartTokens
+			}
+		}
 
 		// 将本轮工具执行结果（Observation）持久化到 Session 中
 		observationMsgs := contextHistory[len(contextHistory)-len(actionResp.ToolCalls):]
@@ -276,6 +312,7 @@ func (e *AgentEngine) Run(ctx context.Context, session *Session, userPrompt stri
 		turnSpan.EndSpan() // 结束 Turn 跨度（进入下一轮前）
 	}
 
+	e.totalTurns = turnCount
 	return nil
 }
 
@@ -475,7 +512,7 @@ func (e *AgentEngine) consumeStream(ctx context.Context, ch <-chan provider.Stre
 //     的追加顺序始终等于模型输出 ToolCalls 的原始顺序。
 //  4. 后台任务感知：引擎在执行 Bash 工具时,通过对比执行前后的 TaskManager 状态
 //     自动发现新启动的后台进程,加入追踪集合用于后续异步通知。
-func (e *AgentEngine) executeToolsInParallel(ctx context.Context, toolCalls []schema.ToolCall, contextHistory *[]schema.Message, reporter Reporter) (schema.ToolCall, schema.ToolResult) {
+func (e *AgentEngine) executeToolsInParallel(ctx context.Context, toolCalls []schema.ToolCall, contextHistory *[]schema.Message, reporter Reporter) (schema.ToolCall, schema.ToolResult, bool) {
 	n := len(toolCalls)
 
 	// 预分配结果槽位，每个 goroutine 写入自己的索引，无需互斥锁
@@ -485,6 +522,7 @@ func (e *AgentEngine) executeToolsInParallel(ctx context.Context, toolCalls []sc
 		finalOutput string
 	}
 	slots := make([]slot, n)
+	turnHasError := false // 本轮是否有工具触发错误，用于试错成本统计
 
 	// 【后台任务追踪】记录执行前已知的所有 Task ID
 	knownTasksBefore := e.snapshotTaskIDs()
@@ -530,8 +568,9 @@ func (e *AgentEngine) executeToolsInParallel(ctx context.Context, toolCalls []sc
 			// 【核心拦截与注入】
 			finalOutput := result.Output
 			if result.IsError {
-				// 发生错误，交由 RecoveryManager 诊断并注入“锦囊妙计”
+				// 发生错误，交由 RecoveryManager 诊断并注入”锦囊妙计”
 				finalOutput = e.recovery.AnalyzeAndInject(tc.Name, result.Output)
+				turnHasError = true
 				log.Printf(" -> [Go-%d] ❌ 注入救援指南: %s\n", i, finalOutput)
 			} else {
 				log.Printf("  -> [Go-%d] ✅ 工具执行成功 (返回 %d 字节)\n", i, len(result.Output))
@@ -622,6 +661,7 @@ func (e *AgentEngine) executeToolsInParallel(ctx context.Context, toolCalls []sc
 	// 按原始顺序（索引 0 → n-1）将 Observation 组装回上下文
 	for _, s := range slots {
 		if s.result.IsError {
+			turnHasError = true
 			log.Printf("  -> ❌ 工具执行报错 [%s]: %s\n", s.call.Name, s.finalOutput)
 		} else {
 			log.Printf("  -> ✅ 工具执行成功 [%s] (返回 %d 字节)\n", s.call.Name, len(s.result.Output))
@@ -650,7 +690,7 @@ func (e *AgentEngine) executeToolsInParallel(ctx context.Context, toolCalls []sc
 
 	// 返回本轮最后一个工具调用及其原始结果，供上层进行死循环探测
 	last := slots[n-1]
-	return last.call, last.result
+	return last.call, last.result, turnHasError
 }
 func (e *AgentEngine) isWriteTool(name string) bool {
 	switch name {

@@ -29,11 +29,14 @@ type TestCase struct {
 
 // TestResult 存放单次跑分结果
 type TestResult struct {
-	TestCaseID   string
-	Passed       bool
-	TotalCostCNY float64
-	DurationMs   int64
-	ErrorMsg     string
+	TestCaseID     string
+	Passed         bool
+	TotalCostCNY   float64
+	DurationMs     int64
+	ErrorMsg       string
+	TotalTurns     int // 总 Turn 数
+	ErrorTurns     int // 触发过 RecoveryManager 的 Turn 数（试错频率）
+	RecoveryTokens int // 错误 Turn 累计消耗的 token 数（试错烈度）
 }
 
 // BenchmarkRunner 是自动化跑分执行器
@@ -69,9 +72,11 @@ func (b *BenchmarkRunner) RunSuite(ctx context.Context, testcases []TestCase) {
 
 		if res.Passed {
 			passedCount++
-			log.Printf(">>> ✅ 用例 [%s] 测试通过! | 耗时: %dms | 花费: ¥%.6f\n", tc.ID, res.DurationMs, res.TotalCostCNY)
+			log.Printf(">>> ✅ 用例 [%s] 测试通过! | 耗时: %dms | 花费: ¥%.6f | Turns: %d (Errors: %d) | RecoveryTokens: %d\n",
+				tc.ID, res.DurationMs, res.TotalCostCNY, res.TotalTurns, res.ErrorTurns, res.RecoveryTokens)
 		} else {
-			log.Printf(">>> ❌ 用例 [%s] 测试失败! | 错误: %s\n", tc.ID, res.ErrorMsg)
+			log.Printf(">>> ❌ 用例 [%s] 测试失败! | 错误: %s | Turns: %d (Errors: %d) | RecoveryTokens: %d\n",
+				tc.ID, res.ErrorMsg, res.TotalTurns, res.ErrorTurns, res.RecoveryTokens)
 		}
 		totalCost += res.TotalCostCNY
 	}
@@ -112,14 +117,21 @@ func (b *BenchmarkRunner) runSingleTest(ctx context.Context, tc TestCase) TestRe
 	registry.Register(tools.NewEditFileTool(workDir))
 
 	eng := engine.NewAgentEngine(trackedProvider, registry, workDir, false, false)
+	eng.SetBillingSession(session)
 
 	// 4. 让 Agent 开始干活
 	engineSession := engine.NewSession(tc.ID, workDir)
 	engineSession.Append(schema.Message{Role: schema.RoleUser, Content: tc.TaskPrompt})
 	err := eng.Run(ctx, engineSession, tc.TaskPrompt, nil)
 
+	// 读取试错成本指标（即使 Run 失败也可能有部分数据）
+	totalTurns, errorTurns, recoveryTokens := eng.Metrics()
+
 	if err != nil {
-		return TestResult{TestCaseID: tc.ID, Passed: false, ErrorMsg: fmt.Sprintf("Agent 崩溃: %v", err)}
+		return TestResult{
+			TestCaseID: tc.ID, Passed: false, ErrorMsg: fmt.Sprintf("Agent 崩溃: %v", err),
+			TotalTurns: totalTurns, ErrorTurns: errorTurns, RecoveryTokens: recoveryTokens,
+		}
 	}
 
 	// 5. 【核心断言】Agent 跑完了，我们来验收成果！
@@ -131,18 +143,24 @@ func (b *BenchmarkRunner) runSingleTest(ctx context.Context, tc TestCase) TestRe
 
 	if err != nil {
 		return TestResult{
-			TestCaseID:   tc.ID,
-			Passed:       false,
-			TotalCostCNY: session.TotalCostCNY,
-			DurationMs:   duration,
-			ErrorMsg:     fmt.Sprintf("验证脚本执行失败: %s", string(out)),
+			TestCaseID:     tc.ID,
+			Passed:         false,
+			TotalCostCNY:   session.TotalCostCNY,
+			DurationMs:     duration,
+			ErrorMsg:       fmt.Sprintf("验证脚本执行失败: %s", string(out)),
+			TotalTurns:     totalTurns,
+			ErrorTurns:     errorTurns,
+			RecoveryTokens: recoveryTokens,
 		}
 	}
 
 	return TestResult{
-		TestCaseID:   tc.ID,
-		Passed:       true,
-		TotalCostCNY: session.TotalCostCNY,
-		DurationMs:   duration,
+		TestCaseID:     tc.ID,
+		Passed:         true,
+		TotalCostCNY:   session.TotalCostCNY,
+		DurationMs:     duration,
+		TotalTurns:     totalTurns,
+		ErrorTurns:     errorTurns,
+		RecoveryTokens: recoveryTokens,
 	}
 }

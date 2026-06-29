@@ -25,6 +25,13 @@ func NewSession(id string) *Session {
 	}
 }
 
+// TotalTokens 返回当前累计的总 Token 数（Prompt + Completion）。
+func (s *Session) TotalTokens() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.TotalPromptTokens + s.TotalCompletionTokens
+}
+
 // RecordUsage 累加本次 API 调用的 Token 消耗和成本。
 func (s *Session) RecordUsage(prompt int, completion int, cost float64) {
 	s.mu.Lock()
