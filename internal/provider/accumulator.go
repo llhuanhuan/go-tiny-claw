@@ -79,15 +79,19 @@ func (a *StreamAccumulator) Thinking() string {
 // Finalize 将所有累积的数据组装为完整的 schema.Message。
 //
 // 组装规则：
-//   - Content ← content 缓冲区
+//   - Content ← content 缓冲区（如果为空，则使用 thinking 缓冲区）
 //   - ToolCalls ← 按 Index 升序排列的工具调用（Args 已拼接为完整 JSON）
-//
-// 如果希望在最终消息中保留 Thinking 文本，请在调用 Finalize 后手动设置
-// msg.Content = acc.Thinking() + acc.Content() 或类似组合。
 func (a *StreamAccumulator) Finalize() *schema.Message {
+	content := a.content.String()
+
+	// 如果没有 text 内容但有 thinking 内容，使用 thinking 作为 content
+	if content == "" && a.thinking.Len() > 0 {
+		content = a.thinking.String()
+	}
+
 	msg := &schema.Message{
 		Role:    schema.RoleAssistant,
-		Content: a.content.String(),
+		Content: content,
 		Usage:   a.usage, // 携带 API 返回的 Token 消耗
 	}
 

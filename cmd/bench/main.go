@@ -49,21 +49,37 @@ func main() {
 	runner.RunSuite(context.Background(), testcases)
 }
 
-// detectProvider 参考 cmd/claw/main.go 的同名函数：
-// 自动从 ~/.claude/settings.json 注入环境变量，根据可用的 API Key 选择 Provider。
-// 优先使用 ZHIPU_API_KEY (glm-4.5-air)，回退到 Anthropic (Claude Code 配置)。
+// detectProvider 自动检测环境变量，返回对应的 Provider 和模型名。
+//   - ANTHROPIC_BASE_URL 有值 → Claude SDK
+//   - OPENAI_BASE_URL 有值 → OpenAI SDK
 func detectProvider() (provider.LLMProvider, string) {
 	loadClaudeCodeEnv()
 
 	switch {
-	case os.Getenv("ZHIPU_API_KEY") != "":
-		log.Println("[Bootstrap] 检测到 ZHIPU_API_KEY，使用 glm-4.5-air 模型")
-		return provider.NewZhipuOpenAIProvider("glm-4.5-air"), "glm-4.5-air"
-	case os.Getenv("ANTHROPIC_API_KEY") != "" || os.Getenv("ANTHROPIC_AUTH_TOKEN") != "":
-		log.Println("[Bootstrap] 检测到 Anthropic 凭据，使用 Anthropic Provider")
-		return provider.NewAnthropicProvider(""), "anthropic"
+	case os.Getenv("ANTHROPIC_BASE_URL") != "":
+		log.Println("[Bootstrap] 检测到 ANTHROPIC_BASE_URL，使用 Claude SDK")
+		p, err := provider.NewClaudeProvider("ANTHROPIC_AUTH_TOKEN,ANTHROPIC_API_KEY",
+			provider.WithBaseURL(os.Getenv("ANTHROPIC_BASE_URL")),
+			provider.WithModel(os.Getenv("ANTHROPIC_MODEL")),
+		)
+		if err != nil {
+			log.Fatalf("创建 Claude Provider 失败: %v", err)
+		}
+		return p, "claude"
+
+	case os.Getenv("OPENAI_BASE_URL") != "":
+		log.Println("[Bootstrap] 检测到 OPENAI_BASE_URL，使用 OpenAI SDK")
+		p, err := provider.NewOpenAIProvider("OPENAI_API_KEY",
+			provider.WithBaseURL(os.Getenv("OPENAI_BASE_URL")),
+			provider.WithModel(os.Getenv("OPENAI_MODEL")),
+		)
+		if err != nil {
+			log.Fatalf("创建 OpenAI Provider 失败: %v", err)
+		}
+		return p, "openai"
+
 	default:
-		log.Fatal("请设置 ZHIPU_API_KEY 或 ANTHROPIC_API_KEY（可通过 Claude Code settings.json 配置）")
+		log.Fatal("请设置 ANTHROPIC_BASE_URL 或 OPENAI_BASE_URL（可通过 Claude Code settings.json 配置）")
 		return nil, ""
 	}
 }

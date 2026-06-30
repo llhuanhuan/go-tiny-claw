@@ -107,12 +107,39 @@ func main() {
 	}
 }
 
-// detectProvider 直接读取 Claude Code (~/.claude/settings.json) 的 env 配置，
-// 注入当前进程环境变量后创建 Anthropic Provider。
-// 无需手动设置任何环境变量，完全复用 Claude Code 已配置的模型和密钥。
+// detectProvider 自动检测环境变量，返回对应的 Provider。
+//   - ANTHROPIC_BASE_URL 有值 → Claude SDK
+//   - OPENAI_BASE_URL 有值 → OpenAI SDK
 func detectProvider() provider.LLMProvider {
 	loadClaudeCodeEnv()
-	return provider.NewAnthropicProvider("")
+
+	switch {
+	case os.Getenv("ANTHROPIC_BASE_URL") != "":
+		log.Println("[Bootstrap] 检测到 ANTHROPIC_BASE_URL，使用 Claude SDK")
+		p, err := provider.NewClaudeProvider("ANTHROPIC_AUTH_TOKEN,ANTHROPIC_API_KEY",
+			provider.WithBaseURL(os.Getenv("ANTHROPIC_BASE_URL")),
+			provider.WithModel(os.Getenv("ANTHROPIC_MODEL")),
+		)
+		if err != nil {
+			log.Fatalf("创建 Claude Provider 失败: %v", err)
+		}
+		return p
+
+	case os.Getenv("OPENAI_BASE_URL") != "":
+		log.Println("[Bootstrap] 检测到 OPENAI_BASE_URL，使用 OpenAI SDK")
+		p, err := provider.NewOpenAIProvider("OPENAI_API_KEY",
+			provider.WithBaseURL(os.Getenv("OPENAI_BASE_URL")),
+			provider.WithModel(os.Getenv("OPENAI_MODEL")),
+		)
+		if err != nil {
+			log.Fatalf("创建 OpenAI Provider 失败: %v", err)
+		}
+		return p
+
+	default:
+		log.Fatal("请设置 ANTHROPIC_BASE_URL 或 OPENAI_BASE_URL（可通过 Claude Code settings.json 配置）")
+		return nil
+	}
 }
 
 // claudeCodeSettings 是 ~/.claude/settings.json 的部分结构。

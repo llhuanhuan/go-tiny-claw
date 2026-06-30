@@ -313,7 +313,11 @@ func newIntegrationRunner(t *testing.T) *BenchmarkRunner {
 	case "anthropic":
 		r := NewBenchmarkRunner("anthropic")
 		r.ProviderFactory = func(model string) provider.LLMProvider {
-			return provider.NewAnthropicProvider("")
+			p, err := provider.NewAnthropicProvider("")
+			if err != nil {
+				t.Fatalf("创建 Anthropic Provider 失败: %v", err)
+			}
+			return p
 		}
 		return r
 	}

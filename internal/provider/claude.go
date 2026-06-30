@@ -5,87 +5,68 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"os"
 
 	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/anthropics/anthropic-sdk-go/option"
 	"github.com/lhuan/go-tiny-claw/internal/schema"
 )
 
+const defaultClaudeModel = "claude-sonnet-4-20250514"
+
+// ClaudeProvider 通过 Anthropic SDK 与 Claude 系列模型通信。
 type ClaudeProvider struct {
 	client anthropic.Client
 	model  string
 }
 
-func NewDeepSeekClaudeProvider(model string) *ClaudeProvider {
-	apiKey := os.Getenv("DEEPSEEK_API_KEY")
-	if apiKey == "" {
-		panic("请设置 DEEPSEEK_API_KEY 环境变量")
-	}
-	baseURL := "https://api.deepseek.com/"
-	return &ClaudeProvider{
-		client: anthropic.NewClient(option.WithAPIKey(apiKey), option.WithBaseURL(baseURL)),
-		model:  model,
-	}
-}
-
-func NewZhipuClaudeProvider(model string) *ClaudeProvider {
-	apiKey := os.Getenv("ZHIPU_API_KEY")
-	if apiKey == "" {
-		panic("请设置 ZHIPU_API_KEY 环境变量")
-	}
-	baseURL := "https://open.bigmodel.cn/api/paas/v4/"
-	return &ClaudeProvider{
-		client: anthropic.NewClient(option.WithAPIKey(apiKey), option.WithBaseURL(baseURL)),
-		model:  model,
-	}
-}
-
-// NewAnthropicProvider 使用 Claude Code 系统配置连接 Anthropic API。
+// NewClaudeProvider 创建 Claude Provider，支持 Functional Options。
 //
-// 自动读取以下环境变量（通常由 ~/.claude/settings.json 的 env 字段注入）：
-//   - ANTHROPIC_API_KEY / ANTHROPIC_AUTH_TOKEN: API 认证凭据
-//   - ANTHROPIC_BASE_URL: 自定义 API 端点（代理/中转）
-//   - ANTHROPIC_MODEL: 默认模型名称
-func NewAnthropicProvider(model string) *ClaudeProvider {
-	// 认证：优先 API_KEY，回退到 AUTH_TOKEN（Claude Code 代理场景）
-	apiKey := os.Getenv("ANTHROPIC_API_KEY")
-	if apiKey == "" {
-		apiKey = os.Getenv("ANTHROPIC_AUTH_TOKEN")
-	}
-	if apiKey == "" {
-		panic("请设置 ANTHROPIC_API_KEY 或 ANTHROPIC_AUTH_TOKEN（可通过 Claude Code settings.json 配置）")
+// envKeys 支持逗号分隔的多个环境变量名，按顺序尝试读取 API Key。
+// 典型用法：
+//
+//	p, err := NewClaudeProvider("ANTHROPIC_AUTH_TOKEN,ANTHROPIC_API_KEY",
+//	    WithBaseURL(os.Getenv("ANTHROPIC_BASE_URL")),
+//	    WithModel(os.Getenv("ANTHROPIC_MODEL")),
+//	)
+//
+// 也可直接传入 API Key：
+//
+//	p, err := NewClaudeProvider("",
+//	    WithAPIKey("sk-ant-xxx"),
+//	    WithModel("claude-sonnet-4-20250514"),
+//	)
+func NewClaudeProvider(envKeys string, opts ...ProviderOption) (*ClaudeProvider, error) {
+	cfg, err := loadConfig(envKeys, opts, ProviderConfig{
+		Model: defaultClaudeModel,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("create Claude provider: %w", err)
 	}
 
-	// 模型：参数为空时读取环境变量
-	if model == "" {
-		model = os.Getenv("ANTHROPIC_MODEL")
-	}
-	if model == "" {
-		model = "claude-sonnet-4-20250514"
-	}
-
-	// 构建客户端选项
-	opts := []option.RequestOption{option.WithAPIKey(apiKey)}
-
-	// 自定义 BaseURL（代理/中转场景）
-	if baseURL := os.Getenv("ANTHROPIC_BASE_URL"); baseURL != "" {
-		opts = append(opts, option.WithBaseURL(baseURL))
+	clientOpts := []option.RequestOption{option.WithAPIKey(cfg.APIKey)}
+	if cfg.BaseURL != "" {
+		clientOpts = append(clientOpts, option.WithBaseURL(cfg.BaseURL))
 	}
 
 	return &ClaudeProvider{
-		client: anthropic.NewClient(opts...),
-		model:  model,
-	}
+		client: anthropic.NewClient(clientOpts...),
+		model:  cfg.Model,
+	}, nil
+}
+
+// NewAnthropicProvider 创建连接 Anthropic 官方 API 的 Provider。
+// 自动从环境变量 ANTHROPIC_AUTH_TOKEN / ANTHROPIC_API_KEY 读取凭据。
+func NewAnthropicProvider(model string) (*ClaudeProvider, error) {
+	return NewClaudeProvider("ANTHROPIC_AUTH_TOKEN,ANTHROPIC_API_KEY",
+		WithModel(model),
+	)
 }
 
 // buildAnthropicParams 将内部消息和工具定义翻译为 Anthropic SDK 的请求参数。
-// StreamGenerate 和 Generate 共享此翻译逻辑。
 func (p *ClaudeProvider) buildAnthropicParams(msgs []schema.Message, availableTools []schema.ToolDefinition) (anthropic.MessageNewParams, error) {
 	var anthropicMsgs []anthropic.MessageParam
 	var systemPrompt string
 
-	// 1. 消息翻译
 	for _, msg := range msgs {
 		switch msg.Role {
 		case schema.RoleSystem:
@@ -107,7 +88,9 @@ func (p *ClaudeProvider) buildAnthropicParams(msgs []schema.Message, availableTo
 			}
 			for _, tc := range msg.ToolCalls {
 				var inputMap map[string]interface{}
-				_ = json.Unmarshal(tc.Arguments, &inputMap)
+				if err := json.Unmarshal(tc.Arguments, &inputMap); err != nil {
+					return anthropic.MessageNewParams{}, fmt.Errorf("unmarshal tool args for %s: %w", tc.Name, err)
+				}
 				blocks = append(blocks, anthropic.ContentBlockParamUnion{
 					OfToolUse: &anthropic.ToolUseBlockParam{
 						ID:    tc.ID,
@@ -119,10 +102,11 @@ func (p *ClaudeProvider) buildAnthropicParams(msgs []schema.Message, availableTo
 			if len(blocks) > 0 {
 				anthropicMsgs = append(anthropicMsgs, anthropic.NewAssistantMessage(blocks...))
 			}
+		default:
+			return anthropic.MessageNewParams{}, fmt.Errorf("unsupported message role: %s", msg.Role)
 		}
 	}
 
-	// 2. 工具 Schema 翻译
 	var anthropicTools []anthropic.ToolUnionParam
 	for _, toolDef := range availableTools {
 		var properties map[string]any
@@ -148,7 +132,6 @@ func (p *ClaudeProvider) buildAnthropicParams(msgs []schema.Message, availableTo
 		anthropicTools = append(anthropicTools, anthropic.ToolUnionParam{OfTool: &tp})
 	}
 
-	// 3. 构建请求参数
 	params := anthropic.MessageNewParams{
 		Model:     anthropic.Model(p.model),
 		MaxTokens: 4096,
@@ -169,9 +152,6 @@ func (p *ClaudeProvider) buildAnthropicParams(msgs []schema.Message, availableTo
 }
 
 // StreamGenerate 实现 LLMProvider 接口的流式推理。
-//
-// 内部通过 Anthropic SDK 的 NewStreaming API 订阅 SSE 事件流，
-// 在 goroutine 中将 SDK 事件转换为统一的 StreamEvent 并通过 channel 投递。
 func (p *ClaudeProvider) StreamGenerate(
 	ctx context.Context,
 	msgs []schema.Message,
@@ -179,10 +159,9 @@ func (p *ClaudeProvider) StreamGenerate(
 ) (<-chan StreamEvent, error) {
 	params, err := p.buildAnthropicParams(msgs, availableTools)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("build params: %w", err)
 	}
 
-	// 启动 SDK 流
 	stream := p.client.Messages.NewStreaming(ctx, params)
 
 	ch := make(chan StreamEvent, 16)
@@ -190,16 +169,12 @@ func (p *ClaudeProvider) StreamGenerate(
 	go func() {
 		defer close(ch)
 
-		// 使用 SDK 内置的 Accumulate 机制来跟踪工具调用 ID 信息。
-		// 当看到 ContentBlockDeltaEvent 且类型为 input_json_delta 时，
-		// 需要知道它对应哪个工具调用。我们通过维护一个 index → {id, name} 的映射来解决。
 		toolUseMeta := make(map[int64]struct {
 			ID   string
 			Name string
 		})
 
 		for stream.Next() {
-			// 支持 ctx 取消
 			select {
 			case <-ctx.Done():
 				ch <- StreamEvent{Type: StreamEventError, Error: ctx.Err()}
@@ -210,9 +185,7 @@ func (p *ClaudeProvider) StreamGenerate(
 			event := stream.Current()
 
 			switch ev := event.AsAny().(type) {
-
 			case anthropic.MessageStartEvent:
-				// 捕获初始 Usage 数据（InputTokens）
 				if ev.Message.Usage.InputTokens > 0 {
 					ch <- StreamEvent{
 						Type: StreamEventUsage,
@@ -225,8 +198,6 @@ func (p *ClaudeProvider) StreamGenerate(
 				}
 
 			case anthropic.ContentBlockStartEvent:
-				// 当内容块开始时，记录其类型信息。
-				// tool_use 块会在后续 delta 事件中逐步接收 JSON 片段。
 				if ev.ContentBlock.Type == "tool_use" {
 					toolUseMeta[ev.Index] = struct {
 						ID   string
@@ -250,25 +221,20 @@ func (p *ClaudeProvider) StreamGenerate(
 						Type:  StreamEventTextDelta,
 						Delta: ev.Delta.Text,
 					}
-
 				case "input_json_delta":
 					ch <- StreamEvent{
 						Type:          StreamEventToolCallArgsDelta,
 						ToolCallIndex: int(ev.Index),
 						Delta:         ev.Delta.PartialJSON,
 					}
-
 				case "thinking_delta":
 					ch <- StreamEvent{
 						Type:  StreamEventThinkingDelta,
 						Delta: ev.Delta.Thinking,
 					}
-
-				// signature_delta / citations_delta 是协议内部细节，忽略
 				}
 
 			case anthropic.MessageDeltaEvent:
-				// 捕获最终 Usage 数据（OutputTokens 在 MessageDelta 中返回）
 				if ev.Usage.OutputTokens > 0 {
 					ch <- StreamEvent{
 						Type: StreamEventUsage,
@@ -280,15 +246,13 @@ func (p *ClaudeProvider) StreamGenerate(
 				}
 
 			case anthropic.MessageStopEvent:
-				// 消息结束，标记完成
 				ch <- StreamEvent{Type: StreamEventDone}
 				return
 			}
 		}
 
-		// 流被中断（Next 返回 false 但没有 MessageStopEvent）
 		if err := stream.Err(); err != nil {
-			ch <- StreamEvent{Type: StreamEventError, Error: fmt.Errorf("Claude 流式响应中断: %w", err)}
+			ch <- StreamEvent{Type: StreamEventError, Error: fmt.Errorf("Claude stream interrupted: %w", err)}
 		} else {
 			ch <- StreamEvent{Type: StreamEventDone}
 		}

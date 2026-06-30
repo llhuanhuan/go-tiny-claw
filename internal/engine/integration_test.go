@@ -63,7 +63,10 @@ func loadTestEnv() {
 func newTestEngine(t *testing.T) (*AgentEngine, string) {
 	t.Helper()
 
-	llmProvider := provider.NewAnthropicProvider("")
+	llmProvider, err := provider.NewAnthropicProvider("")
+	if err != nil {
+		t.Fatalf("创建 Anthropic Provider 失败: %v", err)
+	}
 	workDir := t.TempDir()
 
 	registry := tools.NewRegistry()
@@ -566,7 +569,10 @@ func TestIntegration_ContextCancellation(t *testing.T) {
 func newTestEngineWithSubagent(t *testing.T) (*AgentEngine, string) {
 	t.Helper()
 
-	llmProvider := provider.NewAnthropicProvider("")
+	llmProvider, err := provider.NewAnthropicProvider("")
+	if err != nil {
+		t.Fatalf("创建 Anthropic Provider 失败: %v", err)
+	}
 	workDir := t.TempDir()
 
 	// 主注册表：全量工具

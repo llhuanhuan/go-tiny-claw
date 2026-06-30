@@ -49,7 +49,11 @@ func NewBenchmarkRunner(model string) *BenchmarkRunner {
 	return &BenchmarkRunner{
 		modelName: model,
 		ProviderFactory: func(model string) provider.LLMProvider {
-			return provider.NewZhipuOpenAIProvider(model)
+			p, err := provider.NewAnthropicProvider(model)
+			if err != nil {
+				log.Fatalf("创建 Provider 失败: %v", err)
+			}
+			return p
 		},
 	}
 }

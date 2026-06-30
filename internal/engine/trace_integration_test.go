@@ -131,7 +131,10 @@ func printTraceTree(t *testing.T, span *traceSpan, depth int) {
 func newTraceTestEngine(t *testing.T, enableThinking bool) (*AgentEngine, string) {
 	t.Helper()
 
-	rawProvider := provider.NewAnthropicProvider("")
+	rawProvider, err := provider.NewAnthropicProvider("")
+	if err != nil {
+		t.Fatalf("创建 Anthropic Provider 失败: %v", err)
+	}
 	workDir := t.TempDir()
 
 	// 包装 CostTracker（与 main.go 同逻辑）
