@@ -9,6 +9,12 @@ server:
   port: 48080          # HTTP 服务端口（微信模式）
   mode: debug          # debug | release
 
+# 模型配置
+model:
+  name: ""             # 模型名称，用于计费查找 (如 "glm-4.5-air"、"claude-sonnet-4-20250514")
+  max_context_window: 200000  # 模型上下文窗口 Token 数
+  plan_mode: false             # 计划模式：Agent 使用 PLAN.md/TODO.md 管理长程任务
+
 # 飞书配置（设置 app_id 后自动进入飞书模式）
 feishu:
   app_id: ""
@@ -19,3 +25,27 @@ wechat:
   webhook_url: ""      # 群机器人 Webhook 地址
   token: ""            # 可选，回调签名校验 Token
   encoding_aes_key: "" # 可选，消息加解密密钥
+
+# 任务完成通知配置（桌面 + 手机端）
+# 任一通道启用后，任务完成时自动发送通知
+notify:
+  enabled: false        # 总开关
+  desktop:
+    enabled: false      # Windows Toast 桌面通知
+    app_id: "go-tiny-claw" # Toast 显示的应用名称
+  bark:
+    enabled: false      # Bark iOS 推送（https://day.app/）
+    server_url: "https://api.day.app" # Bark 服务器地址
+    device_key: ""      # 你的 Bark 设备密钥
+    group: "go-tiny-claw" # 通知分组
+    sound: "default"    # 提示音
+    is_archive: true    # 保存到历史记录
+    icon: ""            # 图标 URL（可选）
+  webhook: []           # 通用 Webhook 列表，可配置多个
+  # webhook 示例:
+  # - enabled: true
+  #   url: "https://your-webhook-url.com/notify"
+  #   method: "POST"
+  #   headers:
+  #     Authorization: "Bearer your-token"
+  #   name: "my-bot"

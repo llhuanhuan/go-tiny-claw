@@ -61,9 +61,9 @@ func NewAgentEngine(p provider.LLMProvider, r tools.Registry, workDir string, en
 		EnableThinking: enableThinking,
 		taskManager:    tools.GetTaskManager(),
 		trackedTaskIDs: make(map[string]struct{}),
-		// 【初始化压缩器】：为了便于今天的极端测试，我们将水位线阈值设积极（例如 3000 字符），
-		//  并保护最近的 6 条消息（大约两轮 Turn 的交互）
-		compactor: ctxpkg.NewCompactor(3000, 6),
+		// 【初始化压缩器】：水位线默认 0 表示自动计算（基于 max_context_window 的 15%）
+		// 保护最近的 6 条消息（大约两轮 Turn 的交互）
+		compactor: ctxpkg.NewCompactor(0, 6),
 		PlanMode:  planMode,
 		recovery:  ctxpkg.NewRecoveryManager(),
 		injector:  NewReminderInjector(),
@@ -257,29 +257,24 @@ func (e *AgentEngine) Run(ctx context.Context, session *Session, userPrompt stri
 				reporter.OnThinking(ctx)
 			}
 
-			// 【埋点 3】：记录 Thinking 调用
+			// 【埋点 3】：记录 Thinking 调用（流式输出）
 			thinkCtx, thinkSpan := observability.StartSpan(turnCtx, "LLM.Thinking")
-			thinkResp, err := e.provider.Generate(thinkCtx, compactedContext, nil)
-			thinkSpan.EndSpan() // 结束思考跨度
+			thinkResp, err := e.streamGenerate(thinkCtx, compactedContext, nil, reporter, true)
+			thinkSpan.EndSpan()
 			if err != nil {
-				return fmt.Errorf("Thinking 阶段生成失败: %w", err)
+				return fmt.Errorf("思考阶段生成失败: %w", err)
 			}
 			if thinkResp.Content != "" {
-				// 将思考过程持久化到 Session 中！
 				session.Append(*thinkResp)
-				// 把它追加到当前这一轮的临时上下文中，供 Action 阶段使用
 				compactedContext = append(compactedContext, *thinkResp)
 			}
-
 		}
-		// 3. ================= Phase 2: Action =================
-		// 【埋点 4】：记录 Action 调用
-
+		// 3. ================= Phase 2: Action（流式输出） =================
 		actCtx, actSpan := observability.StartSpan(turnCtx, "LLM.Action")
-		actionResp, err := e.provider.Generate(actCtx, compactedContext, availableTools)
-		actSpan.EndSpan() // 结束行动跨度
+		actionResp, err := e.streamGenerate(actCtx, compactedContext, availableTools, reporter, false)
+		actSpan.EndSpan()
 		if err != nil {
-			return fmt.Errorf("Action 阶段生成失败: %w", err)
+			return fmt.Errorf("行动阶段生成失败: %w", err)
 		}
 
 		// 【驾驭精髓】：注意，写入 Session（硬盘/全量内存）的永远是全量的真实响应，不受 Compact 影响！
@@ -424,15 +419,16 @@ func (e *AgentEngine) injectSubagentNotifications(workingMemory *[]schema.Messag
 	}
 }
 
-// streamGenerate 发起流式推理，边接收边打印，最终返回组装好的 schema.Message。
+// streamGenerate 发起流式推理，通过 Reporter 实时推送增量，最终返回组装好的 schema.Message。
 //
-// 参数 isThinking 控制提示前缀的显示方式：
-//   - true:  打印思考过程，所有文本增量直接输出
-//   - false: 打印助手回复，所有文本增量直接输出
+// 参数：
+//   - reporter: 用于实时推送文本增量（可为 nil，此时静默收集）
+//   - isThinking: 标记当前是否为思考阶段
 func (e *AgentEngine) streamGenerate(
 	ctx context.Context,
 	messages []schema.Message,
 	availableTools []schema.ToolDefinition,
+	reporter Reporter,
 	isThinking bool,
 ) (*schema.Message, error) {
 	ch, err := e.provider.StreamGenerate(ctx, messages, availableTools)
@@ -440,7 +436,7 @@ func (e *AgentEngine) streamGenerate(
 		return nil, fmt.Errorf("启动流式请求失败: %w", err)
 	}
 
-	return e.consumeStream(ctx, ch)
+	return e.consumeStream(ctx, ch, reporter, isThinking)
 }
 
 // consumeStream 消费 StreamEvent 通道，实现"边打印边累积"。
@@ -474,18 +470,16 @@ func (e *AgentEngine) streamGenerate(
 //  2. 将工具调用片段路由到 StreamAccumulator（结构化累积）
 //  3. 监听 ctx.Done() 支持中途取消
 //  4. 在流结束时返回组装好的 schema.Message
-func (e *AgentEngine) consumeStream(ctx context.Context, ch <-chan provider.StreamEvent) (*schema.Message, error) {
+func (e *AgentEngine) consumeStream(ctx context.Context, ch <-chan provider.StreamEvent, reporter Reporter, isThinking bool) (*schema.Message, error) {
 	acc := provider.NewStreamAccumulator()
 
 	for {
 		select {
 		case <-ctx.Done():
-			// 上下文被取消（例如用户 Ctrl+C 或超时）
 			return nil, ctx.Err()
 
 		case ev, ok := <-ch:
 			if !ok {
-				// channel 被关闭但未收到 Done/Error（防御性编程）
 				log.Println("[Engine] 警告：流通道意外关闭，使用已累积的内容")
 				return acc.Finalize(), nil
 			}
@@ -498,21 +492,25 @@ func (e *AgentEngine) consumeStream(ctx context.Context, ch <-chan provider.Stre
 				return acc.Finalize(), nil
 
 			case provider.StreamEventThinkingDelta:
-				fmt.Print(ev.Delta) // 实时打印思考内容
+				if reporter != nil {
+					reporter.OnStreamDelta(ctx, ev.Delta, true)
+				}
 				acc.Ingest(ev)
 
 			case provider.StreamEventTextDelta:
-				fmt.Print(ev.Delta) // 实时打印回复内容
+				if reporter != nil {
+					reporter.OnStreamDelta(ctx, ev.Delta, false)
+				}
 				acc.Ingest(ev)
 
 			case provider.StreamEventToolCallBegin:
 				log.Printf("  -> 📞 [流式] 模型请求调用工具 #%d: %s (%s)\n",
 					ev.ToolCallIndex, ev.ToolCallName, ev.ToolCallID)
-				acc.Ingest(ev)
+					acc.Ingest(ev)
 
 			case provider.StreamEventToolCallArgsDelta:
-				acc.Ingest(ev)
-			}
+					acc.Ingest(ev)
+				}
 		}
 	}
 }
@@ -765,7 +763,7 @@ func (e *AgentEngine) RunSub(ctx context.Context, taskPrompt string, readOnlyReg
 	for {
 		turnCount++
 		if turnCount > maxSubTurns {
-			return "", fmt.Errorf("子智能体探索过于深入，超过 %d 轮被强制召回，请主 Agent 给它更明确的指令", maxSubTurns)
+			return "", fmt.Errorf("子智能体探索过于深入，已超过 %d 轮限制被强制召回，请给它更明确的指令", maxSubTurns)
 		}
 
 		// 【埋点 2】：记录单次 Turn 循环

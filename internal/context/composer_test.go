@@ -147,7 +147,7 @@ func TestPlanMode_CoreIdentityPreserved(t *testing.T) {
 	// 核心身份必须保留
 	coreFragments := []string{
 		"核心身份",
-		"go-tiny-claw",
+		"ai-tiny",
 		"核心纪律",
 		"write_file",
 		"中文回复",

@@ -37,9 +37,10 @@ type WechatConfig struct {
 
 // ModelConfig 定义模型相关的配置，用于自适应压缩决策。
 type ModelConfig struct {
-	Name             string `yaml:"name"`              // 模型名称，用于计费查找 (如 "glm-4.5-air")
-	MaxContextWindow int    `yaml:"max_context_window"` // 模型上下文窗口 Token 数，默认 200000
-	PlanMode         bool   `yaml:"plan_mode"`          // 计划模式开关：开启后 Agent 使用 PLAN.md/TODO.md 进行长程任务管理
+	Name               string `yaml:"name"`                // 模型名称，用于计费查找 (如 "glm-4.5-air")
+	MaxContextWindow   int    `yaml:"max_context_window"`   // 模型上下文窗口 Token 数，默认 200000
+	PlanMode           bool   `yaml:"plan_mode"`            // 计划模式开关：开启后 Agent 使用 PLAN.md/TODO.md 进行长程任务管理
+	CompactorWatermark int    `yaml:"compactor_watermark"`  // 压缩器水位线（字符数），0 = 自动计算
 }
 
 // DefaultConfig 返回一套开箱即用的默认配置。
@@ -50,10 +51,28 @@ func DefaultConfig() *AppConfig {
 			Mode: "debug",
 		},
 		Model: ModelConfig{
-			Name:             "glm-4.5-air", // 默认模型，用于计费查找
-			MaxContextWindow: 200000,         // 默认 200k Token（适配 Claude Sonnet）
+			Name:               "",    // 必须由用户配置
+			MaxContextWindow:   200000, // 默认 200k Token（适配 Claude Sonnet）
+			CompactorWatermark: 0,     // 0 = 自动计算
 		},
 	}
+}
+
+// Validate 校验配置的合法性，在 Load 之后、使用之前调用。
+func (c *AppConfig) Validate() error {
+	if c.Model.MaxContextWindow <= 0 {
+		return fmt.Errorf("model.max_context_window 必须大于 0，当前值: %d", c.Model.MaxContextWindow)
+	}
+	if c.Feishu.AppID != "" && c.Feishu.AppSecret == "" {
+		return fmt.Errorf("飞书模式需要同时配置 app_id 和 app_secret")
+	}
+	if c.Wechat.WebhookURL != "" && c.Wechat.Token == "" {
+		log.Printf("[Config] ⚠️ 企业微信 webhook_url 已配置但 token 为空，签名校验将被跳过")
+	}
+	if c.Server.Port <= 0 || c.Server.Port > 65535 {
+		return fmt.Errorf("server.port 必须在 1-65535 之间，当前值: %d", c.Server.Port)
+	}
+	return nil
 }
 
 // LoadConfig 从指定路径加载 YAML 配置文件。

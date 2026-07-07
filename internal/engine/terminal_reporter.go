@@ -19,6 +19,11 @@ func (r *TerminalReporter) OnThinking(ctx context.Context) {
 	fmt.Print("🧠 [内部思考]: ")
 }
 
+func (r *TerminalReporter) OnStreamDelta(ctx context.Context, delta string, isThinking bool) {
+	// 流式增量直接打印到终端，实现实时逐字输出
+	fmt.Print(delta)
+}
+
 func (r *TerminalReporter) OnToolCall(ctx context.Context, toolName string, args string) {
 	fmt.Printf("[🛠️ 调用工具] %s\n", toolName)
 
@@ -52,12 +57,8 @@ func (r *TerminalReporter) OnToolResult(ctx context.Context, toolName string, re
 }
 
 func (r *TerminalReporter) OnMessage(ctx context.Context, content string) {
-	// 模型回复直接打印（流式在 consumeStream 中已实时输出，
-	// 这里作为完整性保障 —— 若流未输出文本则补打）
-	if content != "" {
-		fmt.Print(content)
-	}
-	fmt.Printf("\n🤖 Agent 回复:\n%s\n\n", content)
+	// 流式模式下文本已通过 OnStreamDelta 实时输出，这里只打印结尾换行
+	fmt.Printf("\n")
 }
 
 // 编译时类型检查：确保 TerminalReporter 实现了 Reporter 接口

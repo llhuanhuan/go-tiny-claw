@@ -114,7 +114,7 @@ func (r *registryImpl) Execute(ctx context.Context, call schema.ToolCall) schema
 	// 1. 路由查找：如果在注册表中找不到该工具，这是模型产生了幻觉，直接向模型抛出错误
 	tool, exists := r.tools[call.Name]
 	if !exists {
-		errMsg := fmt.Sprintf("Error: 系统中不存在名为 '%s' 的工具。", call.Name)
+		errMsg := fmt.Sprintf("错误：系统中不存在名为 '%s' 的工具，请检查工具名称是否正确。", call.Name)
 		return schema.ToolResult{
 			ToolCallID: call.ID,
 			Output:     errMsg,
@@ -159,7 +159,7 @@ func (r *registryImpl) buildToolHandler(ctx context.Context, tool BaseTool) Tool
 		if err != nil {
 			return schema.ToolResult{
 				ToolCallID: call.ID,
-				Output:     fmt.Sprintf("Error executing %s: %v", call.Name, err),
+				Output:     fmt.Sprintf("工具 %s 执行失败: %v", call.Name, err),
 				IsError:    true,
 			}
 		}

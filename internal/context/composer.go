@@ -47,6 +47,11 @@ const (
 // NewCompactor 创建一个新的自适应压缩器。
 //   - maxWindowTokens: 模型上下文窗口大小（Token 数）
 //   - retainLastMsgs:  保护区消息数
+// watermarkThreshold 是压缩器的字符水位线阈值。
+// 当上下文总字符数超过此阈值时，压缩器开始工作。
+// 0 表示自动计算（基于 MaxWindowTokens 的 15%，假设 1 Token ≈ 4 字符）。
+const defaultWatermarkRatio = 0.15 // 上下文窗口的 15% 作为水位线
+
 func NewCompactor(maxWindowTokens int, retainLastMsgs int) *Compactor {
 	if maxWindowTokens <= 0 {
 		maxWindowTokens = 200000 // 默认 200k Token 窗口

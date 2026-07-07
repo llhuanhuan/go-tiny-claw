@@ -1,19 +1,12 @@
-# Binaries
+# 编译产物
 *.exe
 *.exe~
 *.dll
 *.so
 *.dylib
-go-tiny-claw
 
-# Test binary
-*.test
-
-# Output of go coverage
-*.out
-
-# Go workspace
-go.work
+# 配置文件（含密钥）
+config.yaml
 
 # IDE
 .idea/
@@ -21,10 +14,10 @@ go.work
 *.swp
 *.swo
 
-# Secrets
-.env
-.env.*
-*.pem
-*.key
-secrets.*
-config.yaml
+# 运行时数据
+.claw/sessions/
+.claw/traces/
+
+# 操作系统
+.DS_Store
+Thumbs.db

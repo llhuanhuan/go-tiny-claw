@@ -73,7 +73,7 @@ func (t *SubagentTool) Execute(ctx context.Context, args json.RawMessage) (strin
 	}
 
 	// 【核心改造】：Spawn 立即返回 ID，不阻塞主循环
-	id := GetSubagentManager().Spawn(t.runner, input.TaskPrompt, t.readOnlyRegistry, t.reporter)
+	id := GetSubagentManager().Spawn(ctx, t.runner, input.TaskPrompt, t.readOnlyRegistry, t.reporter)
 
 	return fmt.Sprintf(
 		"子智能体已启动，ID: %s。它将在后台执行探索任务，完成后会自动通知你结果。"+

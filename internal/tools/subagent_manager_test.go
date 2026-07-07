@@ -33,7 +33,7 @@ func TestSubagentManager_Spawn_NonBlocking(t *testing.T) {
 	runner := &mockRunner{delay: 5 * time.Second, summary: "done"}
 
 	start := time.Now()
-	id := mgr.Spawn(runner, "test task", nil, nil)
+	id := mgr.Spawn(context.Background(), runner, "test task", nil, nil)
 	elapsed := time.Since(start)
 
 	if elapsed > 200*time.Millisecond {
@@ -57,7 +57,7 @@ func TestSubagentManager_Get_AfterCompletion(t *testing.T) {
 
 	runner := &mockRunner{delay: 100 * time.Millisecond, summary: "探索报告：找到了关键代码"}
 
-	id := mgr.Spawn(runner, "搜索关键代码", nil, nil)
+	id := mgr.Spawn(context.Background(), runner, "搜索关键代码", nil, nil)
 
 	// 刚启动时应该还在运行
 	snap, ok := mgr.Get(id)
@@ -99,7 +99,7 @@ func TestSubagentManager_Get_Error(t *testing.T) {
 
 	runner := &mockRunner{delay: 50 * time.Millisecond, err: fmt.Errorf("探索超时")}
 
-	id := mgr.Spawn(runner, "不可能完成的任务", nil, nil)
+	id := mgr.Spawn(context.Background(), runner, "不可能完成的任务", nil, nil)
 	time.Sleep(200 * time.Millisecond)
 
 	snap, ok := mgr.Get(id)
@@ -125,7 +125,7 @@ func TestSubagentManager_MarkNotified(t *testing.T) {
 	mgr := &SubagentManager{tasks: make(map[string]*SubagentTask)}
 
 	runner := &mockRunner{delay: 50 * time.Millisecond, summary: "done"}
-	id := mgr.Spawn(runner, "task", nil, nil)
+	id := mgr.Spawn(context.Background(), runner, "task", nil, nil)
 	time.Sleep(200 * time.Millisecond)
 
 	// 未通知前
@@ -153,9 +153,9 @@ func TestSubagentManager_List(t *testing.T) {
 	mgr := &SubagentManager{tasks: make(map[string]*SubagentTask)}
 
 	runner := &mockRunner{delay: 50 * time.Millisecond, summary: "done"}
-	mgr.Spawn(runner, "task1", nil, nil)
-	mgr.Spawn(runner, "task2", nil, nil)
-	mgr.Spawn(runner, "task3", nil, nil)
+	mgr.Spawn(context.Background(), runner, "task1", nil, nil)
+	mgr.Spawn(context.Background(), runner, "task2", nil, nil)
+	mgr.Spawn(context.Background(), runner, "task3", nil, nil)
 
 	list := mgr.List()
 	if len(list) != 3 {
@@ -177,7 +177,7 @@ func TestCheckSubagentTool(t *testing.T) {
 	defer func() { globalSubagentManager = original }()
 
 	runner := &mockRunner{delay: 100 * time.Millisecond, summary: "找到了 3 个关键文件"}
-	id := GetSubagentManager().Spawn(runner, "搜索关键文件", nil, nil)
+	id := GetSubagentManager().Spawn(context.Background(), runner, "搜索关键文件", nil, nil)
 
 	checkTool := NewCheckSubagentTool()
 
@@ -229,9 +229,9 @@ func TestSubagentManager_ParallelSpawn(t *testing.T) {
 	runner3 := &mockRunner{delay: 300 * time.Millisecond, summary: "报告3"}
 
 	start := time.Now()
-	id1 := mgr.Spawn(runner1, "任务1", nil, nil)
-	id2 := mgr.Spawn(runner2, "任务2", nil, nil)
-	id3 := mgr.Spawn(runner3, "任务3", nil, nil)
+	id1 := mgr.Spawn(context.Background(), runner1, "任务1", nil, nil)
+	id2 := mgr.Spawn(context.Background(), runner2, "任务2", nil, nil)
+	id3 := mgr.Spawn(context.Background(), runner3, "任务3", nil, nil)
 	spawnElapsed := time.Since(start)
 
 	if spawnElapsed > 200*time.Millisecond {

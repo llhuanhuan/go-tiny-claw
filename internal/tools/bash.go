@@ -5,12 +5,23 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"os/exec"
+	"runtime"
 	"time"
 
 	"github.com/lhuan/go-tiny-claw/internal/permissions"
 	"github.com/lhuan/go-tiny-claw/internal/schema"
 )
+
+// ApprovalHandler 定义了人工审批的抽象接口。
+// 当权限引擎判定需要人工审批时，通过此接口发起审批请求。
+// 实现者可以是飞书审批（阻塞等待飞书消息）、终端确认（stdin 交互）等。
+type ApprovalHandler interface {
+	// RequestApproval 发起审批请求，阻塞等待结果。
+	// 返回 true 表示批准，false 表示拒绝。
+	RequestApproval(ctx context.Context, taskID string, reason string) (bool, error)
+}
 
 // BashTool 实现了在底层 OS 执行任意 bash 命令的终极原语。
 // 支持两种模式:
@@ -18,8 +29,9 @@ import (
 //   - 后台模式 (run_in_background: true): 立即返回 Task ID,进程持续运行,
 //     适用于 npm run dev / python server.py 等守护进程。
 type BashTool struct {
-	workDir string // 工作区约束
-	permEngine *permissions.Engine // 动态权限引擎
+	workDir        string              // 工作区约束
+	permEngine     *permissions.Engine // 动态权限引擎
+	approvalHandler ApprovalHandler    // 人工审批处理器（可选）
 }
 
 func NewBashTool(workDir string) *BashTool {
@@ -32,6 +44,12 @@ func NewBashToolWithPermissions(workDir string, permEngine *permissions.Engine) 
 		workDir:    workDir,
 		permEngine: permEngine,
 	}
+}
+
+// SetApprovalHandler 设置人工审批处理器。
+// 设置后，当权限引擎返回 "ask" 策略时，将通过此处理器发起审批而非直接拒绝。
+func (t *BashTool) SetApprovalHandler(handler ApprovalHandler) {
+	t.approvalHandler = handler
 }
 
 func (t *BashTool) Name() string {
@@ -83,11 +101,21 @@ func (t *BashTool) Execute(ctx context.Context, args json.RawMessage) (string, e
 				"原因: %s\n"+
 				"匹配规则: %s", input.Command, result.Reason, result.RuleID)
 		case permissions.ActionAsk:
-			// TODO: 集成审批流程，暂时返回错误
-			return "", fmt.Errorf("⏳ 命令需要人工审批 [%s]\n"+
-				"原因: %s\n"+
-				"匹配规则: %s\n"+
-				"请使用 approve 命令批准执行", input.Command, result.Reason, result.RuleID)
+			if t.approvalHandler != nil {
+				approved, err := t.approvalHandler.RequestApproval(ctx, input.Command, result.Reason)
+				if err != nil {
+					return "", fmt.Errorf("审批流程异常 [%s]: %v", input.Command, err)
+				}
+				if !approved {
+					return "", fmt.Errorf("命令被人工拒绝 [%s]，原因: %s", input.Command, result.Reason)
+				}
+				log.Printf("[Bash] ✅ 命令已通过人工审批: %s\n", input.Command)
+			} else {
+				return "", fmt.Errorf("命令需要人工审批 [%s]\n"+
+					"原因: %s\n"+
+					"匹配规则: %s\n"+
+					"当前运行模式不支持审批，请在飞书模式下运行或修改权限规则", input.Command, result.Reason, result.RuleID)
+			}
 		case permissions.ActionAllow:
 			// 允许执行，继续
 		}
@@ -99,10 +127,10 @@ func (t *BashTool) Execute(ctx context.Context, args json.RawMessage) (string, e
 	if input.RunInBackground {
 		taskID, err := GetTaskManager().Spawn(input.Command, t.workDir)
 		if err != nil {
-			return fmt.Sprintf("❌ 后台进程启动失败: %v", err), nil
+			return fmt.Sprintf("后台进程启动失败: %v", err), nil
 		}
 		return fmt.Sprintf(
-			"✅ 后台进程已启动\n"+
+			"后台进程已启动\n"+
 				"   Task ID  : %s\n"+
 				"   命令     : %s\n"+
 				"   提示     : 使用 TaskOutput 工具查看后台输出 (参数: {\"task_id\": \"%s\"})\n"+
@@ -121,8 +149,13 @@ func (t *BashTool) Execute(ctx context.Context, args json.RawMessage) (string, e
 	timeoutCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 
-	// 在 macOS/Linux 下，我们通过将指令包裹在 `bash -c` 中执行，以支持环境变量、管道和逻辑与(&&)等复杂 Shell 语法。
-	cmd := exec.CommandContext(timeoutCtx, "bash", "-c", input.Command)
+	// 跨平台 Shell 选择：Linux/macOS 使用 bash，Windows 使用 cmd /C
+	var cmd *exec.Cmd
+	if runtime.GOOS == "windows" {
+		cmd = exec.CommandContext(timeoutCtx, "cmd", "/C", input.Command)
+	} else {
+		cmd = exec.CommandContext(timeoutCtx, "bash", "-c", input.Command)
+	}
 
 	// 【驾驭底线 2】：绑定执行的工作区目录
 	// 确保命令默认在用户指定的 WorkDir 下执行，而不是引擎启动时的绝对路径。

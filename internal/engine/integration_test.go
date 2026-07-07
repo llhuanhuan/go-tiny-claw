@@ -88,6 +88,7 @@ type captureReporter struct {
 }
 
 func (r *captureReporter) OnThinking(ctx context.Context) {}
+func (r *captureReporter) OnStreamDelta(ctx context.Context, delta string, isThinking bool) {}
 
 func (r *captureReporter) OnToolCall(ctx context.Context, toolName string, args string) {
 	r.mu.Lock()

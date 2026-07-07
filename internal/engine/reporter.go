@@ -11,6 +11,11 @@ type Reporter interface {
 	// 引擎在剥夺工具访问权、强制模型进入规划阶段前触发此回调。
 	OnThinking(ctx context.Context)
 
+	// OnStreamDelta 当流式推理产生文本增量时调用（逐字/逐 token 推送）。
+	// 实现者可用于实时渲染（终端逐字打印、飞书卡片编辑等）。
+	// isThinking 标记当前增量是否属于思考过程。
+	OnStreamDelta(ctx context.Context, delta string, isThinking bool)
+
 	// OnToolCall 当模型决定调用工具时调用。
 	// toolName: 被调用的工具名称 (如 "read_file", "bash")
 	// args: 序列化后的 JSON 参数字符串

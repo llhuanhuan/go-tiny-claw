@@ -2,6 +2,12 @@
 package engine
 
 import (
+	"bufio"
+	"encoding/json"
+	"fmt"
+	"log"
+	"os"
+	"path/filepath"
 	"sync"
 	"time"
 
@@ -39,9 +45,80 @@ func (s *Session) Append(msgs ...schema.Message) {
 	s.history = append(s.history, msgs...)
 	s.UpdatedAt = time.Now()
 
-	// 【持久化预留点】：在真实的工业级实现中（如 Claude Code），
-	// 我们会在这里将 s.history 以 JSONL 的格式 Append 到 workDir/.claw/sessions/xxx.jsonl 中。
-	// s.SaveToDisk()
+	// 【持久化】：每次追加消息后同步写入磁盘（JSONL 格式）
+	if s.WorkDir != "" {
+		s.saveToDisk(msgs)
+	}
+}
+
+// saveToDisk 将新追加的消息以 JSONL 格式写入磁盘。
+// 使用 Append 模式（O_APPEND），不会覆盖已有数据。
+// 文件路径：{WorkDir}/.claw/sessions/{ID}.jsonl
+// 注意：调用方已持有 s.mu 锁，此方法不可再次加锁。
+func (s *Session) saveToDisk(msgs []schema.Message) {
+	sessDir := filepath.Join(s.WorkDir, ".claw", "sessions")
+	if err := os.MkdirAll(sessDir, 0755); err != nil {
+		log.Printf("[Session] ⚠️ 创建会话目录失败: %v\n", err)
+		return
+	}
+
+	filePath := filepath.Join(sessDir, fmt.Sprintf("%s.jsonl", s.ID))
+	f, err := os.OpenFile(filePath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+	if err != nil {
+		log.Printf("[Session] ⚠️ 打开会话文件失败: %v\n", err)
+		return
+	}
+	defer f.Close()
+
+	writer := bufio.NewWriter(f)
+	for _, msg := range msgs {
+		line, err := json.Marshal(msg)
+		if err != nil {
+			log.Printf("[Session] ⚠️ 序列化消息失败: %v\n", err)
+			continue
+		}
+		writer.Write(line)
+		writer.WriteByte('\n')
+	}
+	writer.Flush()
+}
+
+// LoadFromDisk 从磁盘恢复会话历史（JSONL 格式）。
+// 在 GetOrCreate 时调用，实现跨进程断点续跑。
+func (s *Session) LoadFromDisk() error {
+	filePath := filepath.Join(s.WorkDir, ".claw", "sessions", fmt.Sprintf("%s.jsonl", s.ID))
+	f, err := os.Open(filePath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil // 文件不存在是正常情况（新会话）
+		}
+		return fmt.Errorf("打开会话文件失败: %w", err)
+	}
+	defer f.Close()
+
+	var loaded []schema.Message
+	scanner := bufio.NewScanner(f)
+	// 设置更大的缓冲区（1MB），防止超长消息行导致扫描失败
+	scanner.Buffer(make([]byte, 0, 1024*1024), 1024*1024)
+	for scanner.Scan() {
+		var msg schema.Message
+		if err := json.Unmarshal(scanner.Bytes(), &msg); err != nil {
+			log.Printf("[Session] ⚠️ 跳过无法解析的消息行: %v\n", err)
+			continue
+		}
+		loaded = append(loaded, msg)
+	}
+
+	if err := scanner.Err(); err != nil {
+		return fmt.Errorf("读取会话文件失败: %w", err)
+	}
+
+	s.mu.Lock()
+	s.history = loaded
+	s.mu.Unlock()
+
+	log.Printf("[Session] 📂 从磁盘恢复了 %d 条消息 (会话: %s)\n", len(loaded), s.ID)
+	return nil
 }
 
 // GetWorkingMemory 是驾驭工程的核心！
@@ -154,7 +231,8 @@ var GlobalSessionMgr = &SessionManager{
 	sessions: make(map[string]*Session),
 }
 
-// GetOrCreate 获取或创建一个会话
+// GetOrCreate 获取或创建一个会话。
+// 如果磁盘上有该会话的持久化文件（.claw/sessions/{id}.jsonl），会自动恢复历史。
 func (sm *SessionManager) GetOrCreate(id string, workDir string) *Session {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
@@ -163,6 +241,10 @@ func (sm *SessionManager) GetOrCreate(id string, workDir string) *Session {
 		return sess
 	}
 	sess := NewSession(id, workDir)
+	// 尝试从磁盘恢复会话历史（断点续跑）
+	if err := sess.LoadFromDisk(); err != nil {
+		log.Printf("[Session] ⚠️ 恢复会话历史失败: %v\n", err)
+	}
 	sm.sessions[id] = sess
 	return sess
 }

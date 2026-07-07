@@ -30,6 +30,9 @@ func main() {
 	if err != nil {
 		log.Fatalf("加载配置失败: %v", err)
 	}
+	if err := cfg.Validate(); err != nil {
+		log.Fatalf("配置校验失败: %v", err)
+	}
 
 	// 1. 初始化 LLM Provider
 	rawProvider := detectProvider()
@@ -56,9 +59,13 @@ func main() {
 	registry.Register(tools.NewReadFileTool(workDir))
 	registry.Register(tools.NewWriteFileTool(workDir))
 	registry.Register(tools.NewEditFileTool(workDir))
-	registry.Register(tools.NewBashToolWithPermissions(workDir, permEngine))
+	bashTool := tools.NewBashToolWithPermissions(workDir, permEngine)
+	bashTool.SetApprovalHandler(tools.NewConsoleApprovalHandler())
+	registry.Register(bashTool)
 	registry.Register(tools.NewTaskOutputTool())
 	registry.Register(tools.NewTaskStopTool())
+	registry.Register(tools.NewSearchFilesTool(workDir))
+	registry.Register(tools.NewFetchURLTool())
 
 	// 4. 实例化引擎
 	eng := engine.NewAgentEngine(llmProvider, registry, workDir, true, cfg.Model.PlanMode)

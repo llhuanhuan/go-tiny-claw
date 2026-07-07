@@ -272,6 +272,10 @@ func (r *WechatReporter) sendMsg(text string) {
 }
 
 // OnThinking 当模型开始慢思考时调用。
+func (r *WechatReporter) OnStreamDelta(ctx context.Context, delta string, isThinking bool) {
+	// 企业微信模式暂不支持逐字推送，文本通过 OnMessage 一次性发送
+}
+
 func (r *WechatReporter) OnThinking(ctx context.Context) {
 	r.sendMsg("🤔 **模型正在慢思考** (Thinking)...")
 }

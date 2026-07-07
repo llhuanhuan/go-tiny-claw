@@ -249,6 +249,10 @@ func (r *FeishuReporter) sendMsg(text string) {
 	}
 }
 
+func (r *FeishuReporter) OnStreamDelta(ctx context.Context, delta string, isThinking bool) {
+	// 飞书模式暂不支持逐字推送，文本通过 OnMessage 一次性发送
+}
+
 func (r *FeishuReporter) OnThinking(ctx context.Context) {
 	r.sendMsg("🤔 模型正在慢思考...")
 }

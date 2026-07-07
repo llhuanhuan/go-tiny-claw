@@ -83,7 +83,8 @@ func GetSubagentManager() *SubagentManager {
 //
 // 内部启动 goroutine 执行 runner.RunSub()，完成后自动更新状态。
 // 调用者无需等待，后续通过 Get() 或 injectSubagentNotifications 获取结果。
-func (m *SubagentManager) Spawn(runner AgentRunner, prompt string, readOnlyRegistry Registry, reporter interface{}) string {
+// parentCtx 用于取消传播：当父 context 取消时，子智能体也会收到取消信号。
+func (m *SubagentManager) Spawn(parentCtx context.Context, runner AgentRunner, prompt string, readOnlyRegistry Registry, reporter interface{}) string {
 	id := fmt.Sprintf("sa_%d", m.idSeq.Add(1))
 
 	task := &SubagentTask{
@@ -99,12 +100,16 @@ func (m *SubagentManager) Spawn(runner AgentRunner, prompt string, readOnlyRegis
 
 	log.Printf("[SubagentManager] 🚀 子智能体 %s 已入队，任务: %s\n", id, truncatePrompt(prompt, 60))
 
+	// 创建可取消的子 context：主循环取消时子智能体也会收到取消信号
+	// 但子智能体可以独立于主循环完成（Done channel 用于通知完成）
+	subCtx, subCancel := context.WithCancel(parentCtx)
+
 	// 在独立 goroutine 中执行，不阻塞调用者
 	go func() {
 		defer close(task.done)
+		defer subCancel() // 确保释放 context 资源
 
-		// 使用 Background context，子智能体不受主循环 context 取消影响
-		summary, err := runner.RunSub(context.Background(), prompt, readOnlyRegistry, reporter)
+		summary, err := runner.RunSub(subCtx, prompt, readOnlyRegistry, reporter)
 
 		task.mu.Lock()
 		task.EndTime = time.Now()

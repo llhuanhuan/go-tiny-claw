@@ -23,6 +23,8 @@ type mockReporter struct {
 	Messages    []string
 }
 
+func (r *mockReporter) OnStreamDelta(ctx context.Context, delta string, isThinking bool) {}
+
 func (r *mockReporter) OnThinking(ctx context.Context) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
