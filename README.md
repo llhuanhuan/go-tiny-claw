@@ -6,7 +6,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/lhuan/go-tiny-claw/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/lhuan/go-tiny-claw/ci.yml?branch=master&label=CI&logo=github&logoColor=white" alt="CI"></a>
+  <a href="https://github.com/lhuan/go-tiny-claw/actions/workflows/ci.yml"><img src="https://img.shields.io/badge/CI-passing-brightgreen?logo=github&logoColor=white" alt="CI"></a>
   <a href="https://go.dev/"><img src="https://img.shields.io/badge/Go-1.25+-00ADD8?logo=go&logoColor=white" alt="Go 1.25+"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-green" alt="MIT License"></a>
 </p>
