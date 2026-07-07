@@ -206,8 +206,7 @@ go-tiny-claw/
 
 ## 文档
 
-- [架构设计](docs/ARCHITECTURE.md) — 详细架构、核心机制、技术决策
-- [构建流程](docs/BUILD_PROCESS.md) — 从零到一的构建过程和设计动机
+- [设计文档](docs/DESIGN.md) — 架构设计、核心机制、构建演进、从零复现指南
 - [贡献指南](CONTRIBUTING.md) — 开发环境、代码规范、PR 流程
 
 ## License
