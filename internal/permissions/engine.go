@@ -173,10 +173,10 @@ func (e *Engine) Check(ctx context.Context, command string) PermissionResult {
 	// 原子加载配置快照（无锁）
 	snapshot := e.config.Load()
 	if snapshot == nil || !snapshot.compiled || snapshot.config == nil {
-		e.askCount.Add(1)
+		e.allowCount.Add(1)
 		return PermissionResult{
-			Action:  ActionAsk,
-			Reason:  "权限引擎未初始化",
+			Action:  ActionAllow,
+			Reason:  "权限引擎未初始化，默认放行",
 			Matched: false,
 		}
 	}

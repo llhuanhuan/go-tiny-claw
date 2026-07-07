@@ -149,10 +149,16 @@ func (t *BashTool) Execute(ctx context.Context, args json.RawMessage) (string, e
 	timeoutCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 
-	// 跨平台 Shell 选择：Linux/macOS 使用 bash，Windows 使用 cmd /C
+	// 跨平台 Shell：统一使用 bash -c（Windows 上依赖 Git Bash 在 PATH 中）
+	// 不使用 cmd /C，因为它不支持 ls/grep/pipe 等 Unix 工具链
 	var cmd *exec.Cmd
 	if runtime.GOOS == "windows" {
-		cmd = exec.CommandContext(timeoutCtx, "cmd", "/C", input.Command)
+		// 优先尝试 bash（Git Bash），如果不存在则回退到 cmd /C
+		if _, err := exec.LookPath("bash"); err == nil {
+			cmd = exec.CommandContext(timeoutCtx, "bash", "-c", input.Command)
+		} else {
+			cmd = exec.CommandContext(timeoutCtx, "cmd", "/C", input.Command)
+		}
 	} else {
 		cmd = exec.CommandContext(timeoutCtx, "bash", "-c", input.Command)
 	}

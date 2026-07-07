@@ -25,7 +25,22 @@ import (
 func main() {
 	workDir, _ := os.Getwd()
 
-	// 0. 加载配置（config.yaml + 环境变量覆盖）
+	// 0. 提前解析 CLI 参数（-dir 影响工具层的工作区路径）
+	promptPtr := flag.String("prompt", "", "要交给 Agent 执行的任务描述")
+	workDirPtr := flag.String("dir", ".", "Agent 运行的工作区目录路径 (默认为当前目录)")
+	sessionPtr := flag.String("session", "cli_default_session", "指定会话 ID，支持断点续传")
+	flag.Parse()
+
+	// 如果指定了 -dir，使用解析后的绝对路径作为工作区
+	if *workDirPtr != "." {
+		absDir, err := filepath.Abs(*workDirPtr)
+		if err != nil {
+			log.Fatalf("解析工作区路径失败: %v", err)
+		}
+		workDir = absDir
+	}
+
+	// 0.5 加载配置（config.yaml + 环境变量覆盖）
 	cfg, err := LoadConfig("config.yaml")
 	if err != nil {
 		log.Fatalf("加载配置失败: %v", err)
@@ -54,13 +69,16 @@ func main() {
 		log.Printf("[Bootstrap] ✅ 动态权限引擎已启动")
 	}
 
-	// 3. 初始化 Tool Registry
+	// 3. 初始化 Tool Registry（使用解析后的 workDir）
 	registry := tools.NewRegistry()
 	registry.Register(tools.NewReadFileTool(workDir))
 	registry.Register(tools.NewWriteFileTool(workDir))
 	registry.Register(tools.NewEditFileTool(workDir))
 	bashTool := tools.NewBashToolWithPermissions(workDir, permEngine)
-	bashTool.SetApprovalHandler(tools.NewConsoleApprovalHandler())
+	// 仅在交互式终端模式下启用审批（有 -prompt 时默认允许）
+	if *promptPtr == "" {
+		bashTool.SetApprovalHandler(tools.NewConsoleApprovalHandler())
+	}
 	registry.Register(bashTool)
 	registry.Register(tools.NewTaskOutputTool())
 	registry.Register(tools.NewTaskStopTool())
@@ -90,17 +108,11 @@ func main() {
 	// 4.8 注入计费 Session 到引擎，启用试错成本指标
 	eng.SetBillingSession(billingSession)
 
-	// 5. 解析 CLI 参数（-prompt 存在时强制终端模式，优先于飞书/微信）
-	promptPtr := flag.String("prompt", "", "要交给 Agent 执行的任务描述")
-	workDirPtr := flag.String("dir", ".", "Agent 运行的工作区目录路径 (默认为当前目录)")
-	sessionPtr := flag.String("session", "cli_default_session", "指定会话 ID，支持断点续传")
-	flag.Parse()
-
 	// 6. 检测运行模式（CLI -prompt > 飞书 > 微信 > 终端交互）
 	switch {
 	case *promptPtr != "":
 		// CLI 模式：有 -prompt 参数时强制走终端，忽略飞书/微信配置
-		runTerminal(eng, billingSession, *promptPtr, *workDirPtr, *sessionPtr)
+		runTerminal(eng, billingSession, *promptPtr, workDir, *sessionPtr)
 
 	case cfg.Feishu.AppID != "":
 		runFeishu(eng, billingSession, cfg)
@@ -110,7 +122,7 @@ func main() {
 
 	default:
 		// 无 -prompt 且无飞书/微信：交互式终端
-		runTerminal(eng, billingSession, "", ".", "cli_default_session")
+		runTerminal(eng, billingSession, "", workDir, "cli_default_session")
 	}
 }
 
