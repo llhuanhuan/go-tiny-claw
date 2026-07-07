@@ -1,483 +1,215 @@
-# go-tiny-claw
+<h1 align="center">go-tiny-claw</h1>
 
-> 轻量级、自托管的 Go 语言 AI Agent 引擎 —— 用 OS 思维构建 AI 大脑
+<p align="center">
+  <strong>轻量级、自托管的 Go 语言 AI Agent 引擎</strong><br>
+  <em>用 OS 思维构建 AI 大脑 —— ReAct 循环 × 文件系统工具 × Shell 命令</em>
+</p>
 
-go-tiny-claw 是一个用 Go 语言编写的轻量级 AI Agent 引擎，实现了完整的 **ReAct（Reason + Act）循环**。它将大语言模型（LLM）连接到本地文件系统工具和 Shell 命令，让 AI 能够自主完成复杂的工程任务。
+<p align="center">
+  <a href="https://github.com/lhuan/go-tiny-claw/actions"><img src="https://github.com/lhuan/go-tiny-claw/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <a href="https://go.dev/"><img src="https://img.shields.io/badge/Go-1.25+-00ADD8?logo=go" alt="Go 1.25+"></a>
+  <a href="https://goreportcard.com/report/github.com/lhuan/go-tiny-claw"><img src="https://goreportcard.com/badge/github.com/lhuan/go-tiny-claw" alt="Go Report Card"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-green" alt="MIT License"></a>
+</p>
 
-## 特性
+---
 
-- **ReAct 引擎** — Thinking（推理规划）+ Action（工具调用）双阶段循环，Agent 自主决策直至任务完成
-- **流式输出** — 基于 Go Channel 的 SSE 流式架构，实时推送 Thinking / Text / ToolCall 事件，支持逐字输出（OnStreamDelta）
-- **会话持久化** — Session 自动以 JSONL 格式写入磁盘（`.claw/sessions/`），支持跨进程断点续跑
-- **四层模糊匹配** — edit_file 工具实现 L1 精确 → L2 换行标准化 → L3 TrimSpace → L4 滑动窗口智能缩进锚定
-- **后台进程管理** — OS PCB 模型，支持 Spawn / Get / Kill / List / Shutdown 全生命周期管理
-- **并发控制** — 读写分离（读操作并行 + 写操作串行）、信号量限流、环形缓冲区（kfifo）捕获输出
-- **会话管理** — 按用户/聊天隔离的 Session，双维度滑动窗口截断（消息条数 + 字符预算）
-- **自适应上下文压缩** — 5 级压缩策略（无/轻柔/标准/激进/紧急），基于实际 Token 利用率动态调整
-- **渐进式技能系统** — 类似 Claude Code 的 SKILL.md 技能定义，按需加载，元数据优先暴露
-- **子代理系统** — spawn_subagent 异步派发只读子代理，自动通知注入，支持 context 取消传播
-- **Plan 模式** — 强制外部化状态管理（PLAN.md/TODO.md），断点续跑，严格步骤化执行
-- **动态权限引擎** — Copy-on-Write 架构，正则规则热重载，支持 allow / ask / deny 三级策略，ask 策略接入审批流
-- **死循环检测** — MD5 指纹 + 参数规范化，连续 3 次相同失败自动注入强纠正指令
-- **错误恢复** — RecoveryManager 基于错误码注入恢复提示，引导 Agent 自我修正
-- **可观测性** — CostTracker 费用追踪（装饰器模式）+ 分布式追踪（Span 层级 + JSON 导出）
-- **评估框架** — BenchmarkRunner 沙箱化测试执行，支持 setup / validate 脚本，输出通过率和费用报告
-- **多平台接入** — 终端 CLI / 飞书（WebSocket 长连接）/ 企业微信（HTTP Webhook）三种运行模式
-- **飞书审批** — 人工介入审批流（approve / reject 命令），超时自动取消，与权限引擎 ask 策略集成
-- **多模型支持** — Anthropic Claude、OpenAI 兼容协议（DeepSeek、智谱 GLM 等）
-- **API 限流** — 令牌桶算法控制并发 API 调用数，防止触发 Provider 限流
-- **跨平台** — bash 工具自动检测 OS 平台，Windows 下优先使用 Git Bash
-- **配置校验** — 启动时自动校验配置合法性（端口范围、飞书密钥完整性等）
-- **Docker 部署** — 提供多阶段构建 Dockerfile，开箱即用
+## 为什么需要 go-tiny-claw
 
-## 架构总览
+| | Claude Code | Aider | go-tiny-claw |
+|---|---|---|---|
+| 语言 | TypeScript | Python | **Go（单二进制，零依赖部署）** |
+| 部署 | 需要 Node.js 运行时 | 需要 Python 运行时 | **`scp claw && ./claw`** |
+| 模型 | 仅 Anthropic | 多模型 | **Anthropic + OpenAI 兼容** |
+| 平台接入 | 终端 | 终端 | **终端 + 飞书 + 企业微信** |
+| 权限控制 | 简单 allow/deny | 无 | **COW 引擎 + 正则热重载 + 审批流** |
+| 会话持久化 | 本地 SQLite | 无 | **JSONL + 断点续跑** |
+| 子代理 | 无 | 无 | **异步 spawn + 自动通知** |
+| 上下文压缩 | 基础截断 | 基础截断 | **5 级自适应（基于 Token 利用率）** |
+| 后台进程 | 无 | 无 | **OS PCB 模型，全生命周期管理** |
 
-```
-┌─────────────────────────────────────────────────┐
-│              Platform Layer (平台层)              │
-│    Terminal CLI  │  Feishu Bot  │  WeChat Bot    │
-├─────────────────────────────────────────────────┤
-│              Engine Layer (引擎层)               │
-│  ReAct Loop │ Session │ Reminder │ Subagent     │
-├─────────────────────────────────────────────────┤
-│             Context Layer (上下文层)             │
-│  PromptComposer │ Compactor │ RecoveryManager   │
-├─────────────────────────────────────────────────┤
-│              Tools Layer (工具层)                │
-│  read/write/edit_file │ bash │ spawn_subagent   │
-│  search_files │ fetch_url │ read_skill          │
-│  TaskOutput │ TaskStop │ RingBuf │ Approval     │
-├─────────────────────────────────────────────────┤
-│           Permissions Layer (权限层)             │
-│  Dynamic Engine │ COW │ Hot Reload │ Regex      │
-├─────────────────────────────────────────────────┤
-│          Observability Layer (可观测层)          │
-│  CostTracker │ Distributed Tracing │ Eval       │
-├─────────────────────────────────────────────────┤
-│            Provider Layer (模型层)               │
-│    Anthropic Claude  │  OpenAI Compatible       │
-├─────────────────────────────────────────────────┤
-│             Schema Layer (数据层)                │
-│    Message  │  ToolCall  │  ToolResult  │  ...   │
-└─────────────────────────────────────────────────┘
-```
+**一句话**：如果你需要一个可以部署到任意服务器、接入飞书/微信、支持多模型、具备完整权限控制的 AI Agent 引擎，go-tiny-claw 是目前唯一的 Go 原生方案。
 
 ## 快速开始
 
-### 环境要求
-
-- Go 1.25+
-- Anthropic API Key（或其他支持的 LLM API Key）
-
-### 安装
-
 ```bash
-git clone https://github.com/lhuan/go-tiny-claw.git
-cd go-tiny-claw
-go build -o claw.exe ./cmd/claw
-go build -o bench.exe ./cmd/bench
-```
+# 1. 构建
+git clone https://github.com/lhuan/go-tiny-claw.git && cd go-tiny-claw
+go build -o claw ./cmd/claw
 
-### 配置
-
-复制示例配置文件：
-
-```bash
+# 2. 配置
 cp config.yaml.example config.yaml
-```
-
-编辑 `config.yaml`：
-
-```yaml
-server:
-  port: 48080
-  mode: debug
-
-model:
-  name: glm-4.5-air          # 计费查询用的模型名
-  max_context_window: 200000  # 上下文窗口大小
-  plan_mode: false            # Plan 模式开关（PLAN.md/TODO.md）
-
-feishu:
-  app_id: ""        # 设置后自动启用飞书模式
-  app_secret: ""
-
-wechat:
-  webhook_url: ""   # 设置后自动启用企业微信模式
-  token: ""
-  encoding_aes_key: ""
-```
-
-LLM API Key 通过环境变量配置：
-
-```bash
-# Anthropic Claude
+# 编辑 config.yaml 填入模型名称，或设置环境变量：
 export ANTHROPIC_API_KEY="sk-ant-..."
-export ANTHROPIC_MODEL="claude-sonnet-4-20250514"  # 可选
 
-# DeepSeek
-export DEEPSEEK_API_KEY="sk-..."
-
-# 智谱 GLM
-export ZHIPU_API_KEY="..."
+# 3. 运行
+./claw -prompt "分析当前目录的代码结构"
 ```
 
-也可以通过 `~/.claude/settings.json` 自动注入环境变量（与 Claude Code 配置系统集成）。
-
-### 运行
+<details>
+<summary><strong>更多运行模式</strong></summary>
 
 ```bash
-# CLI 模式：-prompt 直接执行任务（非交互，适合脚本/CI）
-./claw.exe -prompt "请帮我分析当前目录的代码结构"
-
 # 指定工作目录 + 会话 ID（断点续跑）
-./claw.exe -prompt "继续上次的任务" -dir /path/to/project -session my-session-id
+./claw -prompt "继续上次的任务" -dir /path/to/project -session my-session-id
 
 # 交互式终端（无 -prompt 时进入）
-./claw.exe
+./claw
 
 # 飞书模式 — 设置 config.yaml 中的 feishu.app_id 后直接运行
-./claw.exe
+./claw
 
 # 企业微信模式 — 设置 config.yaml 中的 wechat.webhook_url 后直接运行
-./claw.exe
+./claw
 
-# Docker 部署
+# Docker
 docker build -t go-tiny-claw .
 docker run -e ANTHROPIC_API_KEY=sk-... go-tiny-claw -prompt "hello"
 ```
 
-运行模式由配置自动检测：
-1. `feishu.app_id` 非空 → 飞书模式
-2. `wechat.webhook_url` 非空 → 企业微信模式
-3. 其他 → 终端 CLI 模式
+</details>
 
-## 项目结构
+<details>
+<summary><strong>支持的模型</strong></summary>
+
+通过环境变量切换 Provider：
+
+| Provider | 环境变量 | 模型示例 |
+|----------|---------|---------|
+| Anthropic Claude | `ANTHROPIC_API_KEY` | claude-sonnet-4-20250514 |
+| DeepSeek | `DEEPSEEK_API_KEY` | deepseek-chat |
+| 智谱 GLM | `ZHIPU_API_KEY` | glm-4.5-air |
+| 任意 OpenAI 兼容 | `OPENAI_BASE_URL` + `OPENAI_API_KEY` | — |
+
+也可通过 `~/.claude/settings.json` 自动注入环境变量（与 Claude Code 配置集成）。
+
+</details>
+
+## 架构
 
 ```
-go-tiny-claw/
-├── cmd/
-│   ├── claw/
-│   │   ├── main.go              # 入口：模式检测、引擎启动
-│   │   └── config.go            # YAML 配置加载（环境变量覆盖）
-│   └── bench/
-│       └── main.go              # Benchmark 独立 CLI 入口
-├── internal/
-│   ├── schema/
-│   │   └── message.go           # 核心数据类型：Message, ToolCall, ToolResult, TokenUsage
-│   ├── provider/
-│   │   ├── interface.go         # LLMProvider 接口 + GenerateBlocking
-│   │   ├── claude.go            # Anthropic Claude 提供者（流式 + 阻塞）
-│   │   ├── opaenai.go           # OpenAI 兼容提供者（DeepSeek、智谱）
-│   │   ├── stream.go            # StreamEvent 类型定义（7 种事件）
-│   │   ├── accumulator.go       # StreamAccumulator：流式事件组装
-│   │   ├── rate_limiter.go      # API 限流器（令牌桶算法）
-│   │   └── mock.go              # MockProvider（单元测试用）
-│   ├── tools/
-│   │   ├── registry.go          # BaseTool 接口 + Registry（工具路由分发 + 中间件链）
-│   │   ├── read_file.go         # 文件读取（8KB 截断保护）
-│   │   ├── write_file.go        # 文件写入（自动创建目录）
-│   │   ├── edit_file.go         # 4 级模糊匹配替换引擎
-│   │   ├── bash.go              # Shell 执行器（同步 30s 超时 + 异步后台）
-│   │   ├── read_skill.go        # 渐进式技能加载器
-│   │   ├── subagent.go          # spawn_subagent + check_subagent 工具
-│   │   ├── subagent_manager.go  # 子代理生命周期管理器
-│   │   ├── task_manager.go      # 后台进程生命周期管理器（OS PCB 模型）
-│   │   ├── task_output.go       # 查询后台任务状态/日志
-│   │   ├── task_stop.go         # 终止后台任务
-│   │   ├── ringbuf.go           # 线程安全环形缓冲区（64KB kfifo）
-│   │   ├── errors.go            # 标准化错误码（ToolError）
-│   │   ├── middleware.go        # ExecutionTimer 中间件
-│   │   ├── approval.go          # 审批处理器（CLI 控制台 + 飞书适配器）
-│   │   ├── search_files.go      # 文件内容搜索（正则匹配）
-│   │   ├── fetch_url.go         # HTTP GET 请求工具
-│   │   ├── edit_file_test.go    # edit_file L1-L4 匹配测试
-│   │   └── *_test.go            # 单元测试
-│   ├── engine/
-│   │   ├── loop.go              # ReAct 核心循环 + RunSub 子代理循环
-│   │   ├── session.go           # 会话管理 + 双维度滑动窗口 + GlobalSessionMgr
-│   │   ├── reporter.go          # Reporter 接口（可插拔输出层）
-│   │   ├── terminal_reporter.go # CLI 终端 Reporter 实现
-│   │   ├── reminder.go          # 死循环检测（MD5 指纹 + 参数规范化）
-│   │   └── *_test.go            # 单元/集成测试
-│   ├── context/
-│   │   ├── composer.go          # PromptComposer（3 段式 System Prompt）+ Compactor（5 级压缩）
-│   │   ├── skill.go             # SKILL.md 解析器 + 渐进式加载
-│   │   ├── session.go           # Billing Session（Token/费用追踪）
-│   │   ├── recovery.go          # RecoveryManager（错误码恢复提示）
-│   │   └── *_test.go            # 单元测试
-│   ├── permissions/
-│   │   ├── engine.go            # 动态权限引擎（COW + 热重载 + 正则规则）
-│   │   ├── utils.go             # 文件读取/modtime 辅助
-│   │   └── engine_test.go       # 单元测试
-│   ├── observability/
-│   │   ├── tracker.go           # CostTracker（装饰器模式，按 Session 计费）
-│   │   ├── trace.go             # 分布式追踪（Span 层级 + JSON 导出）
-│   │   └── tracker_test.go      # 单元测试
-│   ├── feishu/
-│   │   ├── bot.go               # 飞书 WebSocket 机器人 + FeishuReporter
-│   │   ├── approval.go          # 飞书审批管理器（approve/reject + 超时自动取消）
-│   │   └── *_test.go            # 单元测试
-│   ├── wechat/
-│   │   └── bot.go               # 企业微信 Webhook 机器人 + WechatReporter
-│   ├── eval/
-│   │   ├── benchmark.go         # BenchmarkRunner（沙箱化测试 + setup/validate 脚本）
-│   │   └── benchmark_test.go    # 单元/集成测试
-│   └── compression_test.go      # 3 层压缩防御综合测试
-├── .claw/
-│   ├── skills/                  # 技能定义目录
-│   │   └── git-workflow/SKILL.md
-│   ├── permissions.yaml         # 动态权限规则（17 条 deny/ask/allow）
-│   └── traces/                  # 分布式追踪 JSON 导出目录
-├── AGENTS.md                    # Agent 规则（注入 System Prompt）
-├── .gitignore                   # Git 忽略规则（排除密钥和编译产物）
-├── config.yaml.example          # 配置模板（脱敏）
-├── Dockerfile                   # 多阶段构建（alpine 运行时）
-└── go.mod
+┌──────────────────────────────────────────────────────┐
+│                 Platform Layer                        │
+│         Terminal CLI · Feishu Bot · WeChat Bot        │
+├──────────────────────────────────────────────────────┤
+│                 Engine Layer                          │
+│      ReAct Loop · Session (JSONL) · Subagent          │
+├──────────────────────────────────────────────────────┤
+│                Context Layer                          │
+│   PromptComposer · Compactor (5-level) · Recovery     │
+├──────────────────────────────────────────────────────┤
+│                 Tools Layer                           │
+│  read/write/edit_file · bash · search_files           │
+│  fetch_url · spawn_subagent · read_skill              │
+├──────────────────────────────────────────────────────┤
+│              Permissions Layer                        │
+│     COW Engine · Regex Hot Reload · Approval          │
+├──────────────────────────────────────────────────────┤
+│             Observability Layer                       │
+│        CostTracker · Distributed Tracing              │
+├──────────────────────────────────────────────────────┤
+│               Provider Layer                          │
+│       Anthropic Claude · OpenAI Compatible             │
+└──────────────────────────────────────────────────────┘
 ```
 
 ## 内置工具
 
 | 工具 | 说明 |
 |------|------|
-| `read_file` | 读取文件内容，超过 8KB 自动截断 |
-| `write_file` | 创建/覆盖文件，自动创建父目录 |
-| `edit_file` | 模糊字符串替换，4 级降级匹配策略 |
-| `bash` | 执行 Shell 命令，支持同步（30s 超时）和异步后台模式，跨平台（Windows 自动使用 Git Bash） |
-| `search_files` | 正则搜索文件内容，支持文件名通配符过滤 |
-| `fetch_url` | HTTP GET 请求获取网页/API 内容，支持超时和大小截断 |
-| `read_skill` | 渐进式加载 SKILL.md 技能定义 |
-| `TaskOutput` | 查询后台任务状态和输出日志 |
-| `TaskStop` | 终止后台任务或列出所有任务 |
-| `spawn_subagent` | 启动异步子代理（只读工具集），支持 context 取消传播 |
-| `check_subagent` | 轮询子代理完成状态，获取执行结果 |
+| `read_file` | 读取文件（8KB 截断保护） |
+| `write_file` | 写入文件（自动创建父目录） |
+| `edit_file` | 4 级模糊匹配替换（L1 精确 → L2 CRLF → L3 TrimSpace → L4 滑动窗口） |
+| `bash` | Shell 命令（同步 30s 超时 / 异步后台），跨平台 |
+| `search_files` | 正则搜索文件内容，支持通配符过滤 |
+| `fetch_url` | HTTP GET（超时 + 大小截断） |
+| `spawn_subagent` | 异步子代理（只读隔离，context 取消传播） |
+| `check_subagent` | 轮询子代理状态 |
+| `read_skill` | 渐进式加载 SKILL.md |
+| `TaskOutput` / `TaskStop` | 后台进程管理 |
 
-## 核心机制
+## 核心设计
 
 ### ReAct 循环
 
-每轮执行流程：
-
-1. **上下文组装** — System Prompt（PromptComposer）+ Working Memory（6 条消息 / 50K 字符滑动窗口）
-2. **子代理通知注入** — 检查已完成的子代理，将结果注入为 User 消息
-3. **Plan 模式提醒** — 注入轻量级 Plan 模式提醒（不持久化到 Session）
-4. **自适应压缩** — Compactor 根据实际 Token 利用率动态压缩上下文
-5. **Phase 1 - Thinking**（可选）— 不带工具调用 LLM，强制慢思考/推理（流式输出）
-6. **Phase 2 - Action** — 带全部工具调用 LLM（流式输出，逐字推送）
-7. **工具执行** — 只读工具并行（信号量=5），写入工具串行（Workspace RWMutex）
-8. **错误恢复** — RecoveryManager 分析错误并注入恢复提示
-9. **死循环检测** — MD5 指纹 + 参数规范化，连续 3 次相同失败注入强纠正
-10. **循环终止** — LLM 不再返回工具调用时结束
-
-### 编辑工具的 4 级匹配策略
-
-`edit_file` 工具在精确匹配失败时，会依次尝试：
-
 ```
-L1: 精确匹配          — 原始字符串完全一致
-L2: 换行标准化        — \r\n → \n 后匹配
-L3: TrimSpace 匹配    — 去除首尾空白后匹配
-L4: 滑动窗口匹配      — 逐行去缩进 + 智能缩进锚定
+用户输入 → 上下文组装 → 自适应压缩 → Thinking(可选) → Action → 工具执行 → 错误恢复 → 循环/终止
+                                                    ↑                    |
+                                                    └────────────────────┘
 ```
 
-这种设计确保 LLM 生成的代码片段（可能带有不一致的缩进）能够可靠地定位到目标文件中的替换位置。
+- **流式输出**：Thinking 和 Action 阶段均支持逐字推送（OnStreamDelta）
+- **并发策略**：只读工具并行（信号量=5），写入工具串行（Workspace RWMutex）
+- **死循环检测**：MD5 指纹 + 参数规范化，连续 3 次相同失败自动注入强纠正
 
 ### 自适应上下文压缩
 
-Compactor 根据 Token 利用率自动选择压缩级别：
-
-| 利用率 | 级别 | 策略 |
-|--------|------|------|
+| Token 利用率 | 级别 | 策略 |
+|-------------|------|------|
 | < 50% | 无压缩 | 保持完整上下文 |
-| 50-70% | 轻柔 | 仅遮蔽远端历史 |
-| 70-85% | 标准 | 遮蔽远端 + 最近消息首尾各 500 字符 |
-| 85-95% | 激进 | 遮蔽远端 + 最近消息首尾各 200 字符 |
-| > 95% | 紧急 | 遮蔽全部，仅保留最近 2 条消息 |
+| 50–70% | 轻柔 | 遮蔽远端历史 |
+| 70–85% | 标准 | 远端遮蔽 + 近期首尾各 500 字符 |
+| 85–95% | 激进 | 远端遮蔽 + 近期首尾各 200 字符 |
+| > 95% | 紧急 | 仅保留最近 2 条消息 |
 
-### 动态权限引擎
+### 权限引擎
 
-基于 Copy-on-Write 架构的权限系统，通过 `.claw/permissions.yaml` 配置：
-
-- **三级策略** — `allow`（放行）、`ask`（询问用户/飞书审批）、`deny`（拒绝）
-- **审批集成** — `ask` 策略接入审批处理器（CLI 终端交互 / 飞书审批卡片），超时自动拒绝
-- **正则匹配** — 支持正则表达式规则匹配工具调用参数
-- **热重载** — 配置文件修改后自动生效，无需重启
-- **内置安全规则** — 17 条预置规则覆盖 `rm -rf`、`format`、`sudo`、`DROP DATABASE`、`kubectl delete namespace` 等危险操作
-- **优雅降级** — 权限配置文件不存在时默认 allow，不阻塞正常使用
-
-### 子代理系统
-
-通过 `spawn_subagent` / `check_subagent` 工具实现任务分解：
-
-- **只读隔离** — 子代理仅获得只读工具集（read_file、bash 等），无法修改文件
-- **异步执行** — 子代理在独立 goroutine 中运行，最多 10 轮
-- **context 取消传播** — 主循环取消时子代理自动收到取消信号，防止孤儿 goroutine
-- **自动通知** — 子代理完成后自动注入结果到主 Agent 的下一轮对话
-- **并发安全** — SubagentManager 管理生命周期，支持并发多个子代理
-
-### 死循环检测
-
-ReminderInjector 通过 MD5 指纹 + 参数规范化识别重复失败：
-
-- **参数规范化** — 路径标准化、bash 命令归一化，避免误判
-- **渐进纠正** — 第 1 次失败温和提醒，连续 3 次相同失败注入强纠正指令
-- **自动重置** — 不同的工具调用自动重置计数器
-
-### Plan 模式
-
-启用后强制外部化任务状态管理：
-
-- **PLAN.md** — 记录总体计划和当前进度
-- **TODO.md** — 记录待办事项和步骤
-- **断点续跑** — 任务中断后可从 PLAN.md 恢复继续执行
-- **严格步骤化** — 强制使用 checkbox 格式跟踪每一步进度
-
-### 飞书审批
-
-在飞书模式下支持人工介入审批流：
-
-- `approve <taskID>` — 批准任务继续执行
-- `reject <taskID>` — 拒绝任务
-- 超时自动取消，后台自动清理过期审批
-
-## 并发模型
-
-```
-                    ┌──────────────────┐
-                    │    Run() 请求     │
-                    └────────┬─────────┘
-                             │
-                    ┌────────▼─────────┐
-                    │   Workspace 锁    │  ← RWMutex，保证跨 Run 文件系统一致性
-                    │   (Write Lock)    │
-                    └────────┬─────────┘
-                             │
-              ┌──────────────┼──────────────┐
-              │              │              │
-        ┌─────▼─────┐ ┌─────▼─────┐ ┌─────▼─────┐
-        │  只读工具   │ │  只读工具   │ │  写入工具   │
-        │  (并行)    │ │  (并行)    │ │  (串行)    │
-        │  信号量=5  │ │  信号量=5  │ │  独占执行   │
-        └───────────┘ └───────────┘ └───────────┘
+```yaml
+# .claw/permissions.yaml
+rules:
+  - id: block-rm-rf
+    pattern: "rm\\s+-rf"
+    action: deny
+    reason: "禁止递归删除"
+  - id: ask-sudo
+    pattern: "sudo"
+    action: ask       # CLI 模式弹终端确认，飞书模式发审批卡片
+    reason: "需要提权操作"
 ```
 
-- **只读工具**（read_file, read_skill, TaskOutput, spawn_subagent）：通过信号量（buffered channel, cap=5）并行执行
-- **写入工具**（write_file, edit_file, bash）：严格串行执行，保证文件系统一致性
-- **后台任务**：bash 的 `run_in_background=true` 模式，通过 TaskManager 异步管理
-
-## 会话管理
-
-每个用户/聊天拥有独立的 Session，通过 `GlobalSessionMgr`（并发安全 Map）管理：
-
-- **持久化**：每次追加消息后同步写入磁盘（`.claw/sessions/{id}.jsonl`），支持跨进程断点续跑
-- **恢复**：`GetOrCreate` 时自动从磁盘恢复会话历史，`-session` 参数可衔接上次中断的任务
-- **双维度滑动窗口截断**：同时限制消息条数（默认 6 条）和字符预算（默认 50,000 字符）
-- **孤儿 ToolResult 清理**：截断后自动检测并移除没有对应 ToolCall 的 ToolResult，防止 API 400 错误
-- **密钥遗忘机制**：敏感信息（API Key 等）在截断时被安全刷新
-
-## 可观测性
-
-### 费用追踪
-
-CostTracker 以装饰器模式包装 LLMProvider，自动追踪：
-
-- 每次调用的 Input/Output Token 数
-- 按 Session 汇总费用（基于模型定价查表）
-- CLI 模式结束时输出总费用摘要
-
-### 分布式追踪
-
-基于 Span 层级的分布式追踪系统：
-
-- 支持 Parent-Child 关系的 Span 树
-- JSON 格式导出到 `.claw/traces/` 目录
-- 记录工具调用耗时、LLM 调用耗时等关键指标
-
-## 评估框架
-
-通过 `cmd/bench` 独立 CLI 运行 Benchmark：
-
-```bash
-# 构建 Benchmark CLI
-go build -o bench.exe ./cmd/bench
-
-# 运行 Benchmark
-./bench.exe
-```
-
-BenchmarkRunner 特性：
-
-- **沙箱隔离** — 每个测试用例创建独立临时目录
-- **Setup / Validate 脚本** — 通过 Shell 脚本准备环境和验证结果
-- **Mock Provider** — 单元测试可使用 Mock 模拟 LLM 响应
-- **指标输出** — 通过率、总费用、耗时、轮次、试错轮次、恢复 Token 数
-
-测试用例定义示例：
-
-```go
-TestCase{
-    ID:           "edit-accuracy",
-    Name:         "文件编辑准确性测试",
-    SetupScript:  `echo '{"version":"1.0"}' > data.json`,
-    TaskPrompt:   "将 data.json 中的 version 改为 2.0",
-    ValidateScript: `grep -q '"version":"2.0"' data.json`,
-    MaxTurns:     5,
-}
-```
+- **Copy-on-Write**：读操作无锁，写操作原子替换，支持热重载
+- **17 条内置规则**：覆盖 `rm -rf`、`DROP DATABASE`、`kubectl delete namespace` 等
 
 ## 测试
 
 ```bash
-# 单元测试（无需 API Key，使用 MockProvider）
-go test ./internal/tools/... -v
-go test ./internal/engine/... -v -run "TestDeadlock|TestSubagent|TestSession"
-go test ./internal/context/... -v
-go test ./internal/permissions/... -v
-go test ./internal/observability/... -v
-go test ./internal/eval/... -v -run "^Test(New|Run)"
+# 单元测试（无需 API Key）
+go test ./internal/tools/... ./internal/context/... ./internal/permissions/... -v
 
-# 全量验证（编译 + 静态分析 + 测试）
+# 全量验证
 go build ./... && go vet ./... && go test ./internal/...
 
-# 集成测试（需要 ANTHROPIC_API_KEY）
+# 集成测试（需要 API Key）
 go test ./internal/engine/... -v -run TestIntegration
-go test ./internal/eval/... -v -run TestIntegration
 ```
 
-## 技能系统
-
-在 `.claw/skills/` 目录下创建 SKILL.md 文件即可定义技能：
-
-```markdown
----
-name: my-skill
-description: 技能触发描述
-triggers:
-  - "触发关键词"
----
-
-技能完整内容...
-```
-
-技能采用**渐进式暴露**策略：
-- System Prompt 中仅注入技能元数据（name + description）
-- 当 LLM 需要使用技能时，通过 `read_skill` 工具按需加载完整内容
-
-## 配置优先级
+## 项目结构
 
 ```
-环境变量 > config.yaml > 默认值
+go-tiny-claw/
+├── cmd/claw/          # CLI 入口 + 配置加载
+├── cmd/bench/         # Benchmark CLI
+├── internal/
+│   ├── engine/        # ReAct 循环、会话管理、子代理
+│   ├── provider/      # LLM Provider（Claude / OpenAI）+ 限流 + Mock
+│   ├── tools/         # 11 个内置工具 + 注册表 + 中间件
+│   ├── context/       # Prompt 组装、压缩、技能、错误恢复
+│   ├── permissions/   # 动态权限引擎（COW + 热重载）
+│   ├── observability/ # 费用追踪 + 分布式追踪
+│   ├── feishu/        # 飞书 Bot + 审批
+│   ├── wechat/        # 企业微信 Bot
+│   └── eval/          # Benchmark 框架
+├── .claw/             # 技能定义 + 权限规则 + 追踪导出
+├── Dockerfile         # 多阶段构建
+└── config.yaml.example
 ```
 
-## 依赖
+## 文档
 
-| 依赖 | 用途 |
-|------|------|
-| `anthropic-sdk-go` | Anthropic Claude API 客户端 |
-| `openai-go/v3` | OpenAI 兼容 API 客户端 |
-| `oapi-sdk-go/v3` | 飞书 SDK |
-| `yaml.v3` | YAML 配置解析 |
+- [架构设计](docs/ARCHITECTURE.md) — 详细架构、核心机制、技术决策
+- [构建流程](docs/BUILD_PROCESS.md) — 从零到一的构建过程和设计动机
+- [贡献指南](CONTRIBUTING.md) — 开发环境、代码规范、PR 流程
 
 ## License
 
-MIT
+[MIT](LICENSE)
