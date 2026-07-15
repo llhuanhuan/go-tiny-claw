@@ -26,6 +26,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	lark "github.com/larksuite/oapi-sdk-go/v3"
@@ -74,6 +75,10 @@ type FeishuBot struct {
 	factory   AgentEngineFactory  // 工厂模式：per-session 创建引擎
 	wsClient  *larkws.Client      // WebSocket 长连接客户端
 	botName   string              // 机器人名称（从飞书 API 自动获取）
+
+	// 任务控制：追踪每个会话的运行中任务，支持 /stop 中断
+	runningTasks   map[string]context.CancelFunc
+	runningTasksMu sync.Mutex
 }
 
 // NewFeishuBot 创建一个基于长连接的飞书 Bot（工厂模式）。
@@ -90,11 +95,12 @@ func NewFeishuBot(factory AgentEngineFactory, workDir string, appID, appSecret s
 	client := lark.NewClient(appID, appSecret)
 
 	bot := &FeishuBot{
-		client:    client,
-		appID:     appID,
-		appSecret: appSecret,
-		workDir:   workDir,
-		factory:   factory,
+		client:       client,
+		appID:        appID,
+		appSecret:    appSecret,
+		workDir:      workDir,
+		factory:      factory,
+		runningTasks: make(map[string]context.CancelFunc),
 	}
 
 	// 启动时自动获取机器人名称
@@ -168,6 +174,38 @@ func (b *FeishuBot) onMessageReceived(ctx context.Context, event *larkim.P2Messa
 	chatID := *event.Event.Message.ChatId
 	log.Printf("[Feishu] 收到会话 %s 消息: %s", chatID, contentStr)
 
+	// 【命令拦截】：检查是否为控制命令
+	switch {
+	case contentStr == "/stop" || contentStr == "停止":
+		b.runningTasksMu.Lock()
+		cancel, exists := b.runningTasks[chatID]
+		b.runningTasksMu.Unlock()
+		if exists {
+			cancel()
+			b.sendToChat(chatID, "⏹️ 已中断当前任务")
+			log.Printf("[Feishu] 会话 %s: 任务已中断", chatID)
+		} else {
+			b.sendToChat(chatID, "当前没有运行中的任务")
+		}
+		return nil
+
+	case contentStr == "/reset" || contentStr == "重置":
+		// 先中断正在运行的任务
+		b.runningTasksMu.Lock()
+		if cancel, exists := b.runningTasks[chatID]; exists {
+			cancel()
+			delete(b.runningTasks, chatID)
+		}
+		b.runningTasksMu.Unlock()
+		// 清空会话历史
+		sessionID := "feishu:" + chatID
+		sess := engine.GlobalSessionMgr.GetOrCreate(sessionID, b.workDir)
+		sess.ClearHistory()
+		b.sendToChat(chatID, "🔄 会话已重置，历史已清空")
+		log.Printf("[Feishu] 会话 %s: 会话已重置", chatID)
+		return nil
+	}
+
 	// 【审批拦截】：检查是否为人工审批口令
 	if strings.HasPrefix(contentStr, "approve ") {
 		taskID := strings.TrimPrefix(contentStr, "approve ")
@@ -191,6 +229,23 @@ func (b *FeishuBot) onMessageReceived(ctx context.Context, event *larkim.P2Messa
 	return nil
 }
 
+// sendToChat 发送文本消息到指定会话（Bot 自用）。
+func (b *FeishuBot) sendToChat(chatID string, text string) {
+	content := map[string]string{"text": text}
+	data, _ := json.Marshal(content)
+	req := larkim.NewCreateMessageReqBuilder().
+		ReceiveIdType("chat_id").
+		Body(larkim.NewCreateMessageReqBodyBuilder().
+			ReceiveId(chatID).
+			MsgType("text").
+			Content(string(data)).
+			Build()).
+		Build()
+	if _, err := b.client.Im.V1.Message.Create(context.Background(), req); err != nil {
+		log.Printf("[Feishu] 发送消息失败: %v", err)
+	}
+}
+
 // runAgent 在独立 goroutine 中运行 Agent 任务。
 // 通过工厂模式为当前会话创建专属引擎，并将 Reporter 注入 Context。
 func (b *FeishuBot) runAgent(chatID string, prompt string) {
@@ -202,6 +257,16 @@ func (b *FeishuBot) runAgent(chatID string, prompt string) {
 	// 设置较长的超时（飞书消息 API 调用本身有超时）
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
+
+	// 注册 cancel 函数，支持 /stop 中断
+	b.runningTasksMu.Lock()
+	b.runningTasks[chatID] = cancel
+	b.runningTasksMu.Unlock()
+	defer func() {
+		b.runningTasksMu.Lock()
+		delete(b.runningTasks, chatID)
+		b.runningTasksMu.Unlock()
+	}()
 
 	// 1. 获取物理隔离的 Session
 	session := engine.GlobalSessionMgr.GetOrCreate("feishu:"+chatID, b.workDir)
@@ -226,11 +291,17 @@ func (b *FeishuBot) runAgent(chatID string, prompt string) {
 // =============================================================================
 
 type FeishuReporter struct {
-	client *lark.Client
-	chatID string
+	client          *lark.Client
+	chatID          string
+	streamMsgID     string         // 流式推送的消息 ID（首次发送后获取）
+	streamBuf       strings.Builder // 流式文本缓冲区
+	streamMu        sync.Mutex     // 保护 streamBuf
+	lastFlushLen    int            // 上次推送时的文本长度
+	isStreaming     bool           // 是否正在流式推送
 }
 
-func (r *FeishuReporter) sendMsg(text string) {
+// sendMsg 发送文本消息，返回消息 ID（用于后续流式更新）。
+func (r *FeishuReporter) sendMsg(text string) string {
 	content := map[string]string{"text": text}
 	b, _ := json.Marshal(content)
 
@@ -243,18 +314,60 @@ func (r *FeishuReporter) sendMsg(text string) {
 			Build()).
 		Build()
 
-	_, err := r.client.Im.V1.Message.Create(context.Background(), req)
+	resp, err := r.client.Im.V1.Message.Create(context.Background(), req)
 	if err != nil {
 		log.Printf("[Feishu] 发送消息失败: %v", err)
+		return ""
+	}
+	if resp.Data != nil && resp.Data.MessageId != nil {
+		return *resp.Data.MessageId
+	}
+	return ""
+}
+
+// patchMsg 更新已发送的消息内容（飞书 PATCH API）。
+func (r *FeishuReporter) patchMsg(msgID string, text string) {
+	content := map[string]string{"text": text}
+	b, _ := json.Marshal(content)
+
+	req := larkim.NewPatchMessageReqBuilder().
+		MessageId(msgID).
+		Body(larkim.NewPatchMessageReqBodyBuilder().
+			Content(string(b)).
+			Build()).
+		Build()
+
+	_, err := r.client.Im.V1.Message.Patch(context.Background(), req)
+	if err != nil {
+		log.Printf("[Feishu] 更新消息失败: %v", err)
 	}
 }
 
 func (r *FeishuReporter) OnStreamDelta(ctx context.Context, delta string, isThinking bool) {
-	// 飞书模式暂不支持逐字推送，文本通过 OnMessage 一次性发送
+	r.streamMu.Lock()
+	defer r.streamMu.Unlock()
+
+	// 首次收到流式数据时，发送初始消息获取 message_id
+	if !r.isStreaming {
+		r.isStreaming = true
+		r.streamMsgID = r.sendMsg("🤖 正在生成回复...")
+		r.lastFlushLen = 0
+	}
+
+	r.streamBuf.WriteString(delta)
+
+	// 每累积 200 字符或遇到换行时推送一次更新（避免 API 限流）
+	currentLen := r.streamBuf.Len()
+	if currentLen-r.lastFlushLen >= 200 || strings.Contains(delta, "\n") {
+		if r.streamMsgID != "" {
+			r.patchMsg(r.streamMsgID, r.streamBuf.String())
+			r.lastFlushLen = currentLen
+		}
+	}
 }
 
 func (r *FeishuReporter) OnThinking(ctx context.Context) {
-	r.sendMsg("🤔 模型正在慢思考...")
+	// 流式模式下不单独发"慢思考"消息，由 OnStreamDelta 统一处理
 }
 
 func (r *FeishuReporter) OnToolCall(ctx context.Context, toolName string, args string) {
@@ -277,7 +390,21 @@ func (r *FeishuReporter) OnMessage(ctx context.Context, content string) {
 	if len(content) > maxLen {
 		content = content[:maxLen] + "\n\n... (内容过长已截断)"
 	}
-	r.sendMsg(content)
+
+	r.streamMu.Lock()
+	defer r.streamMu.Unlock()
+
+	if r.isStreaming && r.streamMsgID != "" {
+		// 流式模式：最终更新消息为完整内容
+		r.patchMsg(r.streamMsgID, content)
+		r.isStreaming = false
+		r.streamBuf.Reset()
+		r.streamMsgID = ""
+		r.lastFlushLen = 0
+	} else {
+		// 非流式模式（无 delta 输出时）：直接发送
+		r.sendMsg(content)
+	}
 }
 
 var _ engine.Reporter = (*FeishuReporter)(nil)

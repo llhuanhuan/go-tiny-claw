@@ -49,12 +49,19 @@ func main() {
 		log.Fatalf("配置校验失败: %v", err)
 	}
 
+	// 0.6 注入代理配置到环境变量
+	cfg.SetProxyEnv()
+	if cfg.Proxy.HTTP != "" {
+		log.Printf("[Bootstrap] 🌐 网络代理已配置: %s", cfg.Proxy.HTTP)
+	}
+
 	// 1. 初始化 LLM Provider
 	rawProvider := detectProvider()
 
-	// 1.5 创建计费追踪器：包装原始 Provider，自动记录每次 API 调用的 Token 消耗和成本
+	// 1.5 创建重试装饰器 + 计费追踪器
+	retryProvider := provider.NewRetryableProvider(rawProvider)
 	billingSession := ctxpkg.NewSession("global-billing")
-	llmProvider := observability.NewCostTracker(rawProvider, cfg.Model.Name, billingSession)
+	llmProvider := observability.NewCostTracker(retryProvider, cfg.Model.Name, billingSession)
 
 	// 2. 初始化动态权限引擎
 	permConfigPath := filepath.Join(workDir, ".claw", "permissions.yaml")
@@ -75,10 +82,6 @@ func main() {
 	registry.Register(tools.NewWriteFileTool(workDir))
 	registry.Register(tools.NewEditFileTool(workDir))
 	bashTool := tools.NewBashToolWithPermissions(workDir, permEngine)
-	// 仅在交互式终端模式下启用审批（有 -prompt 时默认允许）
-	if *promptPtr == "" {
-		bashTool.SetApprovalHandler(tools.NewConsoleApprovalHandler())
-	}
 	registry.Register(bashTool)
 	registry.Register(tools.NewTaskOutputTool())
 	registry.Register(tools.NewTaskStopTool())

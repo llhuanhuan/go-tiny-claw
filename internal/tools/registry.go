@@ -135,6 +135,21 @@ func (r *registryImpl) Execute(ctx context.Context, call schema.ToolCall) schema
 		}
 	}
 
+	// 2.5 校验工具参数 Schema（防止 LLM 传 malformed JSON 导致 panic）
+	toolDef := tool.Definition()
+	if toolDef.InputSchema != nil {
+		if schemaMap, ok := toolDef.InputSchema.(map[string]interface{}); ok {
+			if err := ValidateToolArgs(call.Arguments, schemaMap); err != nil {
+				log.Printf("[Registry] ⚠️ 工具 %s 参数校验失败: %s\n", call.Name, err)
+				return schema.ToolResult{
+					ToolCallID: call.ID,
+					Output:     fmt.Sprintf("参数校验失败: %s。请检查参数格式后重试。", err),
+					IsError:    true,
+				}
+			}
+		}
+	}
+
 	// 3. 构建环绕式中间件链（洋葱模型：后挂载的先执行）
 	//    最内层是真正的工具执行逻辑
 	handler := r.buildToolHandler(ctx, tool)

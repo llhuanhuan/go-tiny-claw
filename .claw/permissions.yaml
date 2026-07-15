@@ -144,7 +144,7 @@ rules:
 settings:
   # 默认动作：当没有规则匹配时的动作
   # 可选值: allow, ask, deny
-  default_action: "ask"
+  default_action: "allow"
 
   # 审批超时时间（秒）
   approval_timeout: 300

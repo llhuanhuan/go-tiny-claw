@@ -121,6 +121,14 @@ func (s *Session) LoadFromDisk() error {
 	return nil
 }
 
+// ClearHistory 清空会话历史，用于 /reset 命令。
+func (s *Session) ClearHistory() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.history = make([]schema.Message, 0)
+	s.UpdatedAt = time.Now()
+}
+
 // GetWorkingMemory 是驾驭工程的核心！
 // 它不返回全量历史，而是从后往前截取消息，形成 Agent 的"短期工作记忆"。
 //

@@ -10,8 +10,14 @@ server:
   mode: debug          # debug | release
 
 # 模型配置
+# 网络代理（bash 工具、fetch_url 等访问外网时使用）
+proxy:
+  http: ""                  # HTTP 代理，如 "http://127.0.0.1:17891"
+  https: ""                 # HTTPS 代理，如 "http://127.0.0.1:17891"
+  no_proxy: "127.0.0.1,localhost"  # 不走代理的地址
+
 model:
-  name: ""             # 模型名称，用于计费查找 (如 "glm-4.5-air"、"claude-sonnet-4-20250514")
+  name: ""                  # 模型名称，用于计费查找 (如 "glm-4.5-air"、"claude-sonnet-4-20250514")
   max_context_window: 200000  # 模型上下文窗口 Token 数
   plan_mode: false             # 计划模式：Agent 使用 PLAN.md/TODO.md 管理长程任务
 

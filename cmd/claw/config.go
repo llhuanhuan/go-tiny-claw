@@ -11,9 +11,17 @@ import (
 // AppConfig 是应用的完整配置，对应 config.yaml 的顶层结构。
 type AppConfig struct {
 	Server ServerConfig `yaml:"server"`
+	Proxy  ProxyConfig  `yaml:"proxy"`
 	Feishu FeishuConfig `yaml:"feishu"`
 	Wechat WechatConfig `yaml:"wechat"`
 	Model  ModelConfig  `yaml:"model"`
+}
+
+// ProxyConfig 定义网络代理配置。
+type ProxyConfig struct {
+	HTTP    string `yaml:"http"`
+	HTTPS   string `yaml:"https"`
+	NoProxy string `yaml:"no_proxy"`
 }
 
 // ServerConfig 定义了服务启动的核心参数。
@@ -73,6 +81,20 @@ func (c *AppConfig) Validate() error {
 		return fmt.Errorf("server.port 必须在 1-65535 之间，当前值: %d", c.Server.Port)
 	}
 	return nil
+}
+
+// SetProxyEnv 将代理配置注入到进程环境变量中。
+// 在所有网络操作之前调用，确保 bash、fetch_url 等工具都能走代理。
+func (c *AppConfig) SetProxyEnv() {
+	if c.Proxy.HTTP != "" {
+		os.Setenv("HTTP_PROXY", c.Proxy.HTTP)
+	}
+	if c.Proxy.HTTPS != "" {
+		os.Setenv("HTTPS_PROXY", c.Proxy.HTTPS)
+	}
+	if c.Proxy.NoProxy != "" {
+		os.Setenv("NO_PROXY", c.Proxy.NoProxy)
+	}
 }
 
 // LoadConfig 从指定路径加载 YAML 配置文件。

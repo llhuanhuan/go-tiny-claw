@@ -42,7 +42,7 @@ type Rule struct {
 
 // Settings 全局配置
 type Settings struct {
-	DefaultAction     Action `yaml:"default_action"`
+	DefaultAction Action `yaml:"default_action"` // 默认 allow
 	ApprovalTimeout   int    `yaml:"approval_timeout"`
 	LogAllCommands    bool   `yaml:"log_all_commands"`
 	HotReloadInterval int    `yaml:"hot_reload_interval"`
