@@ -1,131 +1,26 @@
 package main
 
 import (
-	"context"
 	"encoding/json"
-	"flag"
 	"fmt"
 	"log"
 	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
-	"time"
+	"context"
 
 	ctxpkg "github.com/lhuan/go-tiny-claw/internal/context"
 	"github.com/lhuan/go-tiny-claw/internal/engine"
 	"github.com/lhuan/go-tiny-claw/internal/feishu"
-	"github.com/lhuan/go-tiny-claw/internal/observability"
-	"github.com/lhuan/go-tiny-claw/internal/permissions"
 	"github.com/lhuan/go-tiny-claw/internal/provider"
-	"github.com/lhuan/go-tiny-claw/internal/tools"
 	"github.com/lhuan/go-tiny-claw/internal/wechat"
 )
 
 func main() {
-	workDir, _ := os.Getwd()
-
-	// 0. 提前解析 CLI 参数（-dir 影响工具层的工作区路径）
-	promptPtr := flag.String("prompt", "", "要交给 Agent 执行的任务描述")
-	workDirPtr := flag.String("dir", ".", "Agent 运行的工作区目录路径 (默认为当前目录)")
-	sessionPtr := flag.String("session", "cli_default_session", "指定会话 ID，支持断点续传")
-	flag.Parse()
-
-	// 如果指定了 -dir，使用解析后的绝对路径作为工作区
-	if *workDirPtr != "." {
-		absDir, err := filepath.Abs(*workDirPtr)
-		if err != nil {
-			log.Fatalf("解析工作区路径失败: %v", err)
-		}
-		workDir = absDir
-	}
-
-	// 0.5 加载配置（config.yaml + 环境变量覆盖）
-	cfg, err := LoadConfig("config.yaml")
-	if err != nil {
-		log.Fatalf("加载配置失败: %v", err)
-	}
-	if err := cfg.Validate(); err != nil {
-		log.Fatalf("配置校验失败: %v", err)
-	}
-
-	// 0.6 注入代理配置到环境变量
-	cfg.SetProxyEnv()
-	if cfg.Proxy.HTTP != "" {
-		log.Printf("[Bootstrap] 🌐 网络代理已配置: %s", cfg.Proxy.HTTP)
-	}
-
-	// 1. 初始化 LLM Provider
-	rawProvider := detectProvider()
-
-	// 1.5 创建重试装饰器 + 计费追踪器
-	retryProvider := provider.NewRetryableProvider(rawProvider)
-	billingSession := ctxpkg.NewSession("global-billing")
-	llmProvider := observability.NewCostTracker(retryProvider, cfg.Model.Name, billingSession)
-
-	// 2. 初始化动态权限引擎
-	permConfigPath := filepath.Join(workDir, ".claw", "permissions.yaml")
-	permEngine := permissions.NewEngine(permConfigPath)
-	if err := permEngine.Load(); err != nil {
-		log.Printf("[Bootstrap] ⚠️ 权限配置加载失败，使用默认策略: %v", err)
-	} else {
-		// 启动热更新监听
-		ctx, cancel := context.WithCancel(context.Background())
-		defer cancel()
-		go permEngine.StartHotReload(ctx)
-		log.Printf("[Bootstrap] ✅ 动态权限引擎已启动")
-	}
-
-	// 3. 初始化 Tool Registry（使用解析后的 workDir）
-	registry := tools.NewRegistry()
-	registry.Register(tools.NewReadFileTool(workDir))
-	registry.Register(tools.NewWriteFileTool(workDir))
-	registry.Register(tools.NewEditFileTool(workDir))
-	bashTool := tools.NewBashToolWithPermissions(workDir, permEngine)
-	registry.Register(bashTool)
-	registry.Register(tools.NewTaskOutputTool())
-	registry.Register(tools.NewTaskStopTool())
-	registry.Register(tools.NewSearchFilesTool(workDir))
-	registry.Register(tools.NewFetchURLTool())
-
-	// 4. 实例化引擎
-	eng := engine.NewAgentEngine(llmProvider, registry, workDir, true, cfg.Model.PlanMode)
-	eng.SetMaxContextWindow(cfg.Model.MaxContextWindow) // 自适应压缩：设置模型上下文窗口
-
-	// 4.5 注册渐进式暴露技能工具 (read_skill)
-	skillLoader := eng.SkillLoader()
-	registry.Register(tools.NewReadSkillTool(skillLoader))
-
-	// 4.6 注册子智能体工具 (spawn_subagent)
-	// 为子智能体创建独立的只读注册表，仅暴露安全工具
-	subRegistry := tools.NewRegistry()
-	subRegistry.Register(tools.NewReadFileTool(workDir))
-	subRegistry.Register(tools.NewBashToolWithPermissions(workDir, permEngine))
-	subRegistry.Register(tools.NewReadSkillTool(skillLoader))
-	registry.Register(tools.NewSubagentTool(eng, subRegistry, nil))
-	registry.Register(tools.NewCheckSubagentTool())
-
-	// 4.7 挂载工具执行计时中间件：记录每个工具的真实物理执行耗时
-	registry.UseToolMiddleware(tools.ExecutionTimer())
-
-	// 4.8 注入计费 Session 到引擎，启用试错成本指标
-	eng.SetBillingSession(billingSession)
-
-	// 6. 检测运行模式（CLI -prompt > 飞书 > 微信 > 终端交互）
-	switch {
-	case *promptPtr != "":
-		// CLI 模式：有 -prompt 参数时强制走终端，忽略飞书/微信配置
-		runTerminal(eng, billingSession, *promptPtr, workDir, *sessionPtr)
-
-	case cfg.Feishu.AppID != "":
-		runFeishu(eng, billingSession, cfg)
-
-	case cfg.Wechat.WebhookURL != "":
-		runWechat(eng, cfg)
-
-	default:
-		// 无 -prompt 且无飞书/微信：交互式终端
-		runTerminal(eng, billingSession, "", workDir, "cli_default_session")
+	rootCmd := newRootCmd()
+	if err := rootCmd.Execute(); err != nil {
+		os.Exit(1)
 	}
 }
 
@@ -251,45 +146,4 @@ func runWechat(eng *engine.AgentEngine, cfg *AppConfig) {
 	if err := http.ListenAndServe(port, mux); err != nil {
 		log.Fatalf("服务器启动失败: %v", err)
 	}
-}
-
-// runTerminal 终端 CLI 模式。
-// prompt 为空时进入交互式单次输入，非空时直接执行。
-func runTerminal(eng *engine.AgentEngine, billingSession *ctxpkg.Session, prompt, dir, sessionID string) {
-	workDir, err := filepath.Abs(dir)
-	if err != nil {
-		log.Fatalf("解析工作区路径失败: %v", err)
-	}
-
-	// 交互式：无 prompt 时提示用户输入
-	if prompt == "" {
-		fmt.Print("请输入任务描述: ")
-		fmt.Scanln(&prompt)
-		if prompt == "" {
-			fmt.Println("未输入任务，退出。")
-			return
-		}
-	}
-
-	fmt.Println("==================================================")
-	fmt.Printf("🚀 启动 go-tiny-claw CLI 引擎...\n")
-	fmt.Printf("📁 锁定工作区: %s\n", workDir)
-	fmt.Println("==================================================")
-
-	reporter := engine.NewTerminalReporter()
-	session := engine.GlobalSessionMgr.GetOrCreate(sessionID, workDir)
-
-	log.Printf("[Bootstrap] 终端模式启动，Prompt: %s\n", prompt)
-	startTime := time.Now()
-
-	if err := eng.Run(context.Background(), session, prompt, reporter); err != nil {
-		log.Fatalf("引擎运行崩溃: %v", err)
-	}
-
-	elapsed := time.Since(startTime)
-	fmt.Println("\n==================================================")
-	fmt.Printf("✨ 任务圆满结束。总耗时: %v\n", elapsed)
-	fmt.Printf("💰 Session 累计消耗: $%.6f | Token: Input %d, Output %d\n",
-		billingSession.TotalCostCNY, billingSession.TotalPromptTokens, billingSession.TotalCompletionTokens)
-	fmt.Println("==================================================")
 }
