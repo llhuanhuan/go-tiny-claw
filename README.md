@@ -258,7 +258,7 @@ rules:
 ```
 
 - **Copy-on-Write**：读操作无锁，写操作原子替换，支持热重载
-- **17 条内置规则**：覆盖 `rm -rf`、`DROP DATABASE`、`kubectl delete namespace` 等
+- **14 条内置规则**：覆盖 `rm -rf`、`DROP DATABASE`、`kubectl delete namespace` 等（5 deny + 5 ask + 4 allow）
 
 ### 分布式追踪（Tracing）
 
@@ -337,6 +337,7 @@ go-tiny-claw/
 ├── internal/
 │   ├── engine/           # ReAct 循环、会话管理、子代理
 │   ├── provider/         # LLM Provider（Claude / OpenAI）+ 限流 + Mock
+│   ├── schema/           # 核心数据类型（Message、ToolCall、ToolResult）
 │   ├── tools/            # 11 个内置工具 + 注册表 + 中间件
 │   ├── context/          # Prompt 组装、压缩、技能、错误恢复
 │   ├── permissions/      # 动态权限引擎（COW + 热重载）
