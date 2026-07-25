@@ -42,28 +42,105 @@ cp config.yaml.example config.yaml
 export ANTHROPIC_API_KEY="sk-ant-..."
 
 # 3. 运行
-./claw -prompt "分析当前目录的代码结构"
+./claw run "分析当前目录的代码结构"
 ```
+
+<details>
+<summary><strong>CLI 子命令</strong></summary>
+
+```bash
+# 单次执行（最常用）
+./claw run "你的任务描述"
+
+# 从文件读取 prompt
+./claw run -f task.txt
+
+# 管道输入（适合脚本集成）
+echo "解释这段代码" | ./claw run
+cat error.log | ./claw run "分析错误日志"
+
+# 交互式 REPL（带命令历史）
+./claw repl
+
+# 查看所有命令
+./claw --help
+
+# 向后兼容 — 旧写法仍然有效
+./claw -prompt "hello"
+```
+
+</details>
+
+<details>
+<summary><strong>子命令一览</strong></summary>
+
+| 命令 | 说明 |
+|------|------|
+| `claw run [prompt]` | 单次执行任务 |
+| `claw repl` | 启动交互式 REPL |
+| `claw feishu` | 启动飞书 Bot |
+| `claw server` | 启动 HTTP API 服务 |
+| `claw session list` | 列出所有会话 |
+| `claw session clean [id]` | 清理会话数据 |
+| `claw config show` | 显示当前配置 |
+| `claw config init` | 生成示例配置 |
+| `claw version` | 显示版本信息 |
+
+</details>
+
+<details>
+<summary><strong>REPL 交互模式</strong></summary>
+
+```bash
+./claw repl
+# 🦞 你好，请输入任务描述
+# 🦞 帮我写一个 Go HTTP 服务器
+# ... Agent 执行中 ...
+# 🦞 /reset          ← 重置会话
+# 🦞 /history        ← 查看输入历史
+# 🦞 /exit           ← 退出
+```
+
+- **Ctrl+C**：中断当前任务（不退出 REPL）
+- **上下箭头**：浏览历史命令
+- 历史自动保存到 `~/.claw_history`
+
+</details>
+
+<details>
+<summary><strong>管道与脚本集成</strong></summary>
+
+```bash
+# 输出纯净内容（无装饰），适合管道传递
+./claw run "分析当前目录" | grep "TODO"
+
+# 退出码：0=成功，1=失败，130=中断
+./claw run "运行测试" && echo "通过" || echo "失败"
+
+# CI/CD 集成示例
+./claw run "检查代码质量" -session "ci-$BUILD_ID"
+```
+
+管道模式下 stdout 只输出内容，装饰信息走 stderr，可安全串联。
+
+</details>
 
 <details>
 <summary><strong>更多运行模式</strong></summary>
 
 ```bash
-# 指定工作目录 + 会话 ID（断点续跑）
-./claw -prompt "继续上次的任务" -dir /path/to/project -session my-session-id
+# 指定会话 ID（断点续跑）
+./claw run "继续上次的任务" --session my-session-id
 
-# 交互式终端（无 -prompt 时进入）
-./claw
+# 飞书模式 — 设置 config.yaml 中的 feishu.app_id 后
+./claw feishu
 
-# 飞书模式 — 设置 config.yaml 中的 feishu.app_id 后直接运行
-./claw
-
-# 企业微信模式 — 设置 config.yaml 中的 wechat.webhook_url 后直接运行
-./claw
+# 企业微信模式 — 设置 config.yaml 中的 wechat.webhook_url 后
+./claw server
 
 # Docker
 docker build -t go-tiny-claw .
-docker run -e ANTHROPIC_API_KEY=sk-... go-tiny-claw -prompt "hello"
+docker run -e ANTHROPIC_API_KEY=sk-... go-tiny-claw run "hello"
 ```
 
 </details>
@@ -88,8 +165,11 @@ docker run -e ANTHROPIC_API_KEY=sk-... go-tiny-claw -prompt "hello"
 
 ```
 ┌──────────────────────────────────────────────────────┐
+│                  CLI Layer (cobra)                     │
+│   run · repl · feishu · server · session · config     │
+├──────────────────────────────────────────────────────┤
 │                 Platform Layer                        │
-│         Terminal CLI · Feishu Bot · WeChat Bot        │
+│     Bootstrap · CLITerminalReporter · Pipe Mode       │
 ├──────────────────────────────────────────────────────┤
 │                 Engine Layer                          │
 │      ReAct Loop · Session (JSONL) · Subagent          │
@@ -228,21 +308,33 @@ go test ./internal/engine/... -v -run TestIntegration
 
 ```
 go-tiny-claw/
-├── cmd/claw/          # CLI 入口 + 配置加载
-├── cmd/bench/         # Benchmark CLI
-├── cmd/trace-demo/    # Tracing 演示程序（模拟 3 轮 ReAct 循环）
+├── cmd/claw/
+│   ├── main.go           # 入口（cobra 根命令 + 飞书/微信启动）
+│   ├── root.go           # cobra 根命令定义 + 旧参数兼容
+│   ├── run.go            # `claw run` — 单次执行（管道 + 文件输入）
+│   ├── repl.go           # `claw repl` — 交互式 REPL（liner）
+│   ├── bootstrap.go      # 引擎初始化栈（Provider → Permissions → Tools → Engine）
+│   ├── terminal.go       # ANSI 终端输出 + 管道安全检测
+│   ├── config.go         # 配置结构定义
+│   ├── feishu_cmd.go     # `claw feishu` 子命令
+│   ├── server_cmd.go     # `claw server` 子命令
+│   ├── session_cmd.go    # `claw session list/clean` 子命令
+│   ├── config_cmd.go     # `claw config show/init` 子命令
+│   └── version_cmd.go    # `claw version` 子命令
+├── cmd/bench/            # Benchmark CLI
+├── cmd/trace-demo/       # Tracing 演示程序
 ├── internal/
-│   ├── engine/        # ReAct 循环、会话管理、子代理
-│   ├── provider/      # LLM Provider（Claude / OpenAI）+ 限流 + Mock
-│   ├── tools/         # 11 个内置工具 + 注册表 + 中间件
-│   ├── context/       # Prompt 组装、压缩、技能、错误恢复
-│   ├── permissions/   # 动态权限引擎（COW + 热重载）
-│   ├── observability/ # 费用追踪 + 分布式追踪
-│   ├── feishu/        # 飞书 Bot + 审批
-│   ├── wechat/        # 企业微信 Bot
-│   └── eval/          # Benchmark 框架
-├── .claw/             # 技能定义 + 权限规则 + 追踪导出
-├── Dockerfile         # 多阶段构建
+│   ├── engine/           # ReAct 循环、会话管理、子代理
+│   ├── provider/         # LLM Provider（Claude / OpenAI）+ 限流 + Mock
+│   ├── tools/            # 11 个内置工具 + 注册表 + 中间件
+│   ├── context/          # Prompt 组装、压缩、技能、错误恢复
+│   ├── permissions/      # 动态权限引擎（COW + 热重载）
+│   ├── observability/    # 费用追踪 + 分布式追踪
+│   ├── feishu/           # 飞书 Bot + 审批
+│   ├── wechat/           # 企业微信 Bot
+│   └── eval/             # Benchmark 框架
+├── .claw/                # 技能定义 + 权限规则 + 追踪导出
+├── Dockerfile            # 多阶段构建
 └── config.yaml.example
 ```
 
