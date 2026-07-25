@@ -128,25 +128,45 @@ func (e *AgentEngine) Run(ctx context.Context, session *Session, userPrompt stri
 	rootSpan.AddAttribute("WorkDir", session.WorkDir)
 
 	// 创建 TraceProvider：注册所有 Exporter（文件 + 日志）
-	// OTelExporter 可通过配置启用（需 Jaeger 运行在 localhost:4317）
-	traceProvider := observability.NewTraceProvider(
+	// OTelExporter 通过环境变量 OTEL_EXPORTER_OTLP_ENDPOINT 启用：
+	//   export OTEL_EXPORTER_OTLP_ENDPOINT=localhost:4317
+	// 未设置时仅使用 File + Log 导出器，零开销。
+	exporters := []observability.Exporter{
 		observability.NewFileExporter(session.WorkDir, session.ID),
 		observability.NewLogExporter(),
-	)
+	}
+	if otelEndpoint := os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT"); otelEndpoint != "" {
+		otelExp, err := observability.NewOTelExporter(ctx, otelEndpoint, "go-tiny-claw")
+		if err != nil {
+			log.Printf("[Tracing] ⚠️ OTel Exporter 初始化失败（已跳过）: %v\n", err)
+		} else {
+			exporters = append(exporters, otelExp)
+			log.Printf("[Tracing] ✅ OTel Exporter 已启用 → %s\n", otelEndpoint)
+		}
+	}
+	traceProvider := observability.NewTraceProvider(exporters...)
 
 	// defer 保证在引擎退出时，无论成功失败，都能结束根 Span 并导出 Trace 报告
-	// 使用独立 context 带超时：即使原始 ctx 被取消（如用户 Ctrl+C），
-	// 导出操作仍有 10s 窗口完成，避免数据丢失。
+	// Export 和 Shutdown 使用独立的超时上下文：
+	//   - Export 10s：快速导出，不阻塞退出
+	//   - Shutdown 30s：OTel Batcher flush 需要更长时间，避免数据丢失
 	defer func() {
 		rootSpan.EndSpan()
-		flushCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-		if err := traceProvider.Export(flushCtx, rootSpan); err != nil {
+
+		// Export: 10s 超时
+		exportCtx, exportCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer exportCancel()
+		if err := traceProvider.Export(exportCtx, rootSpan); err != nil {
 			log.Printf("[Tracing] ⚠️ 部分 Exporter 导出失败: %v\n", err)
 		}
-		if err := traceProvider.Shutdown(flushCtx); err != nil {
+
+		// Shutdown: 30s 超时（独立于 Export，避免共享超时导致 flush 不够）
+		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer shutdownCancel()
+		if err := traceProvider.Shutdown(shutdownCtx); err != nil {
 			log.Printf("[Tracing] ⚠️ 部分 Exporter 关闭失败: %v\n", err)
 		}
+
 		log.Printf("📊 [Tracing] 本次任务的执行回放链路已保存至工作区的 .claw/traces 目录下\n")
 	}()
 
@@ -279,6 +299,7 @@ func (e *AgentEngine) Run(ctx context.Context, session *Session, userPrompt stri
 			thinkResp, err := e.streamGenerate(thinkCtx, compactedContext, nil, reporter, true)
 			thinkSpan.EndSpan()
 			if err != nil {
+				turnSpan.EndSpan()
 				return fmt.Errorf("思考阶段生成失败: %w", err)
 			}
 			if thinkResp.Content != "" {
@@ -291,6 +312,7 @@ func (e *AgentEngine) Run(ctx context.Context, session *Session, userPrompt stri
 		actionResp, err := e.streamGenerate(actCtx, compactedContext, availableTools, reporter, false)
 		actSpan.EndSpan()
 		if err != nil {
+			turnSpan.EndSpan()
 			return fmt.Errorf("行动阶段生成失败: %w", err)
 		}
 
@@ -797,6 +819,7 @@ func (e *AgentEngine) RunSub(ctx context.Context, taskPrompt string, readOnlyReg
 		// 子任务要求急速响应，强制关闭主体的慢思考，直接预测行动
 		actionResp, err := e.provider.Generate(ctx, compactedContext, availableTools)
 		if err != nil {
+			turnSpan.EndSpan()
 			return "", fmt.Errorf("子智能体推理失败: %w", err)
 		}
 

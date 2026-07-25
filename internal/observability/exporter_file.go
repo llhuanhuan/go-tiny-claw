@@ -25,21 +25,29 @@ func NewFileExporter(workDir, sessionID string) *FileExporter {
 }
 
 // Export 将 Span 树序列化为美化的 JSON 文件。
+// 使用纳秒级时间戳避免同一秒内碰撞；原子写入（tmp + rename）防止崩溃产生损坏文件。
 func (f *FileExporter) Export(_ context.Context, rootSpan *Span) error {
 	traceDir := filepath.Join(f.workDir, ".claw", "traces")
 	if err := os.MkdirAll(traceDir, 0755); err != nil {
 		return fmt.Errorf("创建 traces 目录失败: %w", err)
 	}
 
-	filename := filepath.Join(traceDir, fmt.Sprintf("trace_%s_%d.json", f.sessionID, time.Now().Unix()))
+	// 纳秒级时间戳避免同一秒内碰撞
+	filename := filepath.Join(traceDir, fmt.Sprintf("trace_%s_%d.json", f.sessionID, time.Now().UnixNano()))
+	tmpPath := filename + ".tmp"
 
 	data, err := json.MarshalIndent(rootSpan, "", "  ")
 	if err != nil {
 		return fmt.Errorf("序列化 Span 树失败: %w", err)
 	}
 
-	if err := os.WriteFile(filename, data, 0644); err != nil {
-		return fmt.Errorf("写入 trace 文件失败: %w", err)
+	// 原子写入：先写 tmp 文件，再 rename（保证文件完整性）
+	if err := os.WriteFile(tmpPath, data, 0644); err != nil {
+		return fmt.Errorf("写入 trace tmp 文件失败: %w", err)
+	}
+	if err := os.Rename(tmpPath, filename); err != nil {
+		_ = os.Remove(tmpPath) // rename 失败时清理 tmp 文件
+		return fmt.Errorf("rename trace 文件失败: %w", err)
 	}
 
 	return nil

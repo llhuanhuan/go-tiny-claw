@@ -66,14 +66,30 @@ func (tp *TraceProvider) Export(ctx context.Context, rootSpan *Span) error {
 	return errors.Join(errs...)
 }
 
-// Shutdown 优雅关闭所有 Exporter，刷新各自的缓冲区。
+// Shutdown 并行关闭所有 Exporter，刷新各自的缓冲区。
+// 并行化避免单个 Exporter 的 Shutdown 阻塞其他 Exporter 的清理。
 // 返回聚合错误（errors.Join），调用方可选择忽略：_ = tp.Shutdown(ctx)
 func (tp *TraceProvider) Shutdown(ctx context.Context) error {
-	var errs []error
-	for _, exp := range tp.exporters {
-		if err := exp.Shutdown(ctx); err != nil {
-			errs = append(errs, fmt.Errorf("shutdown %T: %w", exp, err))
-		}
+	if len(tp.exporters) == 0 {
+		return nil
 	}
+
+	var (
+		wg   sync.WaitGroup
+		errs []error
+		mu   sync.Mutex
+	)
+	for _, exp := range tp.exporters {
+		wg.Add(1)
+		go func(e Exporter) {
+			defer wg.Done()
+			if err := e.Shutdown(ctx); err != nil {
+				mu.Lock()
+				errs = append(errs, fmt.Errorf("shutdown %T: %w", e, err))
+				mu.Unlock()
+			}
+		}(exp)
+	}
+	wg.Wait()
 	return errors.Join(errs...)
 }

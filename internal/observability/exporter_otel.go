@@ -48,18 +48,26 @@ func NewOTelExporter(ctx context.Context, endpoint string, serviceName string) (
 
 	// 2. 创建 Resource（标识当前服务）
 	// resource.Merge 保留默认 Resource 的属性（host.name, os.type 等），同时追加自定义属性
+	// 注意：resource.Default() 可能已包含 service.name（来自 OTEL_SERVICE_NAME 环境变量），
+	// 我们的自定义属性会覆盖它，确保用户传入的 serviceName 优先。
 	res, err := resource.Merge(
 		resource.Default(),
 		resource.NewWithAttributes(
 			"",
 			attribute.String("service.name", serviceName),
-			attribute.String("service.version", "0.1.0"),
 		),
 	)
 	if err != nil {
 		// resource.Merge 在 schema URL 版本不匹配时也会返回合并后的 res，
 		// 这类 warning 不应阻止初始化
 		log.Printf("[Tracing] ⚠️ Resource merge warning: %v (proceeding with merged result)\n", err)
+	}
+	// 防御性检查：如果 res 为 nil（极端情况），回退到自定义 Resource
+	if res == nil {
+		log.Printf("[Tracing] ⚠️ resource.Merge returned nil, falling back to custom resource\n")
+		res = resource.NewWithAttributes("",
+			attribute.String("service.name", serviceName),
+		)
 	}
 
 	// 3. 创建 TracerProvider（OTel 的核心管理器）
@@ -98,6 +106,10 @@ func MustNewOTelExporter(ctx context.Context, endpoint string, serviceName strin
 //
 // 关键：利用 OTel 的 parent context 维护父子关系 → Jaeger 甘特图自动渲染层级。
 func (o *OTelExporter) Export(ctx context.Context, rootSpan *Span) (err error) {
+	// 参数校验：nil rootSpan 直接返回错误，避免 nil pointer panic
+	if rootSpan == nil {
+		return fmt.Errorf("OTelExporter.Export: rootSpan is nil")
+	}
 	// 防止 convertSpan 中的 panic（如 attribute 类型不支持）导致进程崩溃
 	defer func() {
 		if r := recover(); r != nil {
@@ -110,10 +122,18 @@ func (o *OTelExporter) Export(ctx context.Context, rootSpan *Span) (err error) {
 
 // convertSpan 递归地将我们的 Span 映射为 OTel Span。
 func (o *OTelExporter) convertSpan(ctx context.Context, span *Span) {
+	// 根据 Span 名称推断 SpanKind：
+	//   - Tool.Execute → SpanKindClient（对外部系统的调用）
+	//   - 其他 → SpanKindInternal（内部处理）
+	kind := oteltrace.SpanKindInternal
+	if len(span.Name) >= 12 && span.Name[:12] == "Tool.Execute" {
+		kind = oteltrace.SpanKindClient
+	}
+
 	// 构建 SpanStartOption
 	opts := []oteltrace.SpanStartOption{
 		oteltrace.WithTimestamp(span.StartTime),
-		oteltrace.WithSpanKind(oteltrace.SpanKindInternal),
+		oteltrace.WithSpanKind(kind),
 	}
 
 	// 创建 OTel Span（自动从 ctx 中获取 parent）
@@ -124,8 +144,13 @@ func (o *OTelExporter) convertSpan(ctx context.Context, span *Span) {
 		otelSpan.SetAttributes(o.convertAttributes(span.Attributes)...)
 	}
 
-	// 结束 Span
-	otelSpan.End(oteltrace.WithTimestamp(span.EndTime))
+	// 结束 Span（防御 EndTime 零值：未调用 EndSpan 时 EndTime 为零值，
+	// 会导致 Jaeger 显示 ~53 年的巨大 Duration）
+	endTime := span.EndTime
+	if endTime.IsZero() {
+		endTime = time.Now()
+	}
+	otelSpan.End(oteltrace.WithTimestamp(endTime))
 
 	// 递归子 Span（传入 otelCtx 以建立父子关系）
 	for _, child := range span.Children {

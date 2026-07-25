@@ -252,25 +252,47 @@ func TestOTelExporter_Export_SpanTree(t *testing.T) {
 	t.Logf("  ✅ OTelExporter 正确转换 %d 个 Span（含父子关系）", len(spans))
 }
 
-// TestOTelExporter_Export_PanicRecovery 验证 panic 不会杀死进程。
-func TestOTelExporter_Export_PanicRecovery(t *testing.T) {
+// TestOTelExporter_Export_NilRootSpan 验证 Export(nil) 返回错误而非 panic。
+func TestOTelExporter_Export_NilRootSpan(t *testing.T) {
 	exp, _ := newTestOTelExporter()
 
-	// 构造一个会导致 panic 的 Span（nil Attributes map 写入会 panic）
-	badSpan := &Span{
-		Name:       "BadSpan",
+	err := exp.Export(context.Background(), nil)
+	if err == nil {
+		t.Fatal("Export(nil) 应返回非 nil 错误")
+	}
+	if !strings.Contains(err.Error(), "nil") {
+		t.Errorf("错误信息应包含 'nil': %v", err)
+	}
+	t.Logf("  ✅ Export(nil) 正确返回错误: %v", err)
+}
+
+// TestOTelExporter_Export_ZeroEndTime 验证 EndTime 为零值时不产生 53 年 Duration。
+func TestOTelExporter_Export_ZeroEndTime(t *testing.T) {
+	exp, memExporter := newTestOTelExporter()
+
+	zeroSpan := &Span{
+		Name:       "ZeroEnd",
 		StartTime:  time.Now(),
-		EndTime:    time.Now(),
+		EndTime:    time.Time{}, // 零值
 		DurationMs: 0,
-		Attributes: nil, // convertAttributes 不会 panic，但测试 recover 机制
 	}
 
-	err := exp.Export(context.Background(), badSpan)
+	err := exp.Export(context.Background(), zeroSpan)
 	if err != nil {
-		t.Logf("  ✅ panic 被 recover: %v", err)
-	} else {
-		t.Log("  ✅ Export 正常完成（无 panic）")
+		t.Fatalf("Export 失败: %v", err)
 	}
+
+	spans := memExporter.GetSpans()
+	if len(spans) != 1 {
+		t.Fatalf("期望 1 个 Span, 实际 %d", len(spans))
+	}
+
+	// EndTime 应该被修正为接近 StartTime（而非零值导致 53 年）
+	duration := spans[0].EndTime.Sub(spans[0].StartTime)
+	if duration > 1*time.Second {
+		t.Errorf("Duration 应 < 1s（EndTime 零值已被修正），实际 %v", duration)
+	}
+	t.Logf("  ✅ EndTime 零值已修正，Duration = %v", duration)
 }
 
 // TestOTelExporter_Shutdown 验证 Shutdown 正确关闭 TracerProvider。
