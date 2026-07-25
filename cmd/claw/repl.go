@@ -37,7 +37,7 @@ func newReplCmd() *cobra.Command {
 					return fmt.Errorf("切换工作目录失败: %w", err)
 				}
 			}
-			return runREPL()
+			return runREPL(sessionID)
 		},
 		SilenceUsage: true,
 	}
@@ -51,25 +51,37 @@ func newReplCmd() *cobra.Command {
 // replState 封装 REPL 的运行时状态。
 type replState struct {
 	state       atomic.Int32
-	cancelFunc  context.CancelFunc
+	cancelFunc  atomic.Pointer[context.CancelFunc]
 	engine      *engine.AgentEngine
 	session     *engine.Session
 	billingSess interface{ TotalTokens() int }
 }
 
 // runREPL 启动交互式 REPL 循环。
-func runREPL() error {
-	if !isTerminal() {
-		return fmt.Errorf("REPL 模式需要终端环境（stdin 必须是 TTY）")
+func runREPL(sessionID string) error {
+	if !isStdoutTTY() {
+		return fmt.Errorf("REPL 模式需要终端环境（stdout 必须是 TTY）")
 	}
 
-	cfg := DefaultConfig()
+	cfg, err := LoadConfig("claw.yaml")
+	if err != nil {
+		return fmt.Errorf("加载配置失败: %w", err)
+	}
+
 	b, err := Bootstrap(cfg)
 	if err != nil {
 		return fmt.Errorf("引擎初始化失败: %w", err)
 	}
+	defer func() {
+		if b.CancelFunc != nil {
+			b.CancelFunc()
+		}
+	}()
 
-	session := engine.GlobalSessionMgr.GetOrCreate("repl", b.WorkDir)
+	if sessionID == "" {
+		sessionID = "repl"
+	}
+	session := engine.GlobalSessionMgr.GetOrCreate(sessionID, b.WorkDir)
 
 	state := &replState{
 		engine:      b.Engine,
@@ -85,26 +97,32 @@ func runREPL() error {
 	line.SetCtrlCAborts(true)
 	promptStr := colorize(ansiGreen, "🦞 ")
 
-	// 设置命令历史
+	// 设置命令历史（存放在用户主目录）
+	homeDir, _ := os.UserHomeDir()
 	historyFile := ".claw_history"
+	if homeDir != "" {
+		historyFile = homeDir + string(os.PathSeparator) + ".claw_history"
+	}
 	loadHistory(line, historyFile)
 	defer saveHistory(line, historyFile)
 
 	// 信号处理：Ctrl+C 在 Agent 执行中取消，空闲时退出
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+	quitCh := make(chan struct{})
 	go func() {
 		for range sigCh {
 			switch state.state.Load() {
 			case stateRunning:
-				if state.cancelFunc != nil {
+				if fn := state.cancelFunc.Load(); fn != nil {
 					state.state.Store(stateCancelling)
-					state.cancelFunc()
+					(*fn)()
 				}
 			case stateIdle:
 				fmt.Println("\n👋 再见！")
-				line.Close()
-				os.Exit(0)
+				signal.Stop(sigCh)
+				close(quitCh)
+				return
 			}
 		}
 	}()
@@ -115,6 +133,13 @@ func runREPL() error {
 	fmt.Println()
 
 	for {
+		// 检查是否收到退出信号
+		select {
+		case <-quitCh:
+			return nil
+		default:
+		}
+
 		input, err := line.Prompt(promptStr)
 		if err != nil {
 			if err == liner.ErrPromptAborted {
@@ -165,7 +190,7 @@ func executeREPLTurn(state *replState, prompt string) error {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	state.cancelFunc = cancel
+	state.cancelFunc.Store(&cancel)
 	state.state.Store(stateRunning)
 
 	reporter := NewCLITerminalReporter()

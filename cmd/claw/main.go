@@ -27,7 +27,7 @@ func main() {
 // detectProvider 自动检测环境变量，返回对应的 Provider。
 //   - ANTHROPIC_BASE_URL 有值 → Claude SDK
 //   - OPENAI_BASE_URL 有值 → OpenAI SDK
-func detectProvider() provider.LLMProvider {
+func detectProvider() (provider.LLMProvider, error) {
 	loadClaudeCodeEnv()
 
 	switch {
@@ -38,9 +38,9 @@ func detectProvider() provider.LLMProvider {
 			provider.WithModel(os.Getenv("ANTHROPIC_MODEL")),
 		)
 		if err != nil {
-			log.Fatalf("创建 Claude Provider 失败: %v", err)
+			return nil, fmt.Errorf("创建 Claude Provider 失败: %w", err)
 		}
-		return p
+		return p, nil
 
 	case os.Getenv("OPENAI_BASE_URL") != "":
 		log.Println("[Bootstrap] 检测到 OPENAI_BASE_URL，使用 OpenAI SDK")
@@ -49,13 +49,12 @@ func detectProvider() provider.LLMProvider {
 			provider.WithModel(os.Getenv("OPENAI_MODEL")),
 		)
 		if err != nil {
-			log.Fatalf("创建 OpenAI Provider 失败: %v", err)
+			return nil, fmt.Errorf("创建 OpenAI Provider 失败: %w", err)
 		}
-		return p
+		return p, nil
 
 	default:
-		log.Fatal("请设置 ANTHROPIC_BASE_URL 或 OPENAI_BASE_URL（可通过 Claude Code settings.json 配置）")
-		return nil
+		return nil, fmt.Errorf("请设置 ANTHROPIC_BASE_URL 或 OPENAI_BASE_URL（可通过 Claude Code settings.json 配置）")
 	}
 }
 

@@ -73,9 +73,9 @@ func newRootCmd() *cobra.Command {
 				return runRun(legacyPrompt, sessionID)
 			}
 
-			// 无参数且 stdin 是终端 → 进入 REPL
-			if isTerminal() {
-				return runREPL()
+			// 无参数且 stdout 是终端 → 进入 REPL
+			if isStdoutTTY() {
+				return runREPL("")
 			}
 
 			// stdin 是管道 → 读取管道内容作为 prompt（pipe mode）

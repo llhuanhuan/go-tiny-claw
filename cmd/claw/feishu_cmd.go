@@ -11,7 +11,10 @@ func newFeishuCmd() *cobra.Command {
 		Short: "启动飞书机器人",
 		Long:  "连接飞书开放平台，启动 AI Agent 机器人服务。",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			cfg := DefaultConfig()
+			cfg, err := LoadConfig("claw.yaml")
+			if err != nil {
+				return err
+			}
 			return runFeishuMode(cfg)
 		},
 		SilenceUsage: true,
@@ -26,7 +29,11 @@ func runFeishuMode(cfg *AppConfig) error {
 	if err != nil {
 		return err
 	}
-	_ = b // 飞书模式的完整逻辑保持在原 runFeishu 中
+	defer func() {
+		if b.CancelFunc != nil {
+			b.CancelFunc()
+		}
+	}()
 	runFeishu(b.Engine, b.BillingSession, cfg)
 	return nil
 }

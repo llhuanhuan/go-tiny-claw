@@ -6,6 +6,7 @@ import (
 	"os"
 
 	"github.com/spf13/cobra"
+	"gopkg.in/yaml.v3"
 )
 
 // newConfigCmd 创建 `claw config` 子命令组。
@@ -31,7 +32,10 @@ func newConfigShowCmd() *cobra.Command {
 		Short: "显示当前配置",
 		Long:  "加载并显示当前生效的配置（合并配置文件和环境变量）。",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			cfg := DefaultConfig()
+			cfg, err := LoadConfig("claw.yaml")
+			if err != nil {
+				return err
+			}
 
 			data, err := json.MarshalIndent(cfg, "", "  ")
 			if err != nil {
@@ -55,7 +59,7 @@ func newConfigInitCmd() *cobra.Command {
 		Long:  "在当前目录生成默认的 claw.yaml 配置文件。",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cfg := DefaultConfig()
-			data, err := json.MarshalIndent(cfg, "", "  ")
+			data, err := yaml.Marshal(cfg)
 			if err != nil {
 				return fmt.Errorf("序列化配置失败: %w", err)
 			}

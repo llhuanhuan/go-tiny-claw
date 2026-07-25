@@ -23,14 +23,29 @@ const (
 	ansiBgBlue    = "\033[44m"
 )
 
-// isTerminal 检测 stdout 是否连接到真实的终端设备。
-// 在管道或重定向场景下返回 false，用于禁用 ANSI 颜色和交互式输入。
-func isTerminal() bool {
+// isStdoutTTY 检测 stdout 是否连接到真实的终端设备。
+// 在管道或重定向场景下返回 false，用于禁用 ANSI 颜色输出。
+func isStdoutTTY() bool {
 	fi, err := os.Stdout.Stat()
 	if err != nil {
 		return false
 	}
 	return fi.Mode()&os.ModeCharDevice != 0
+}
+
+// isStdinPipe 检测 stdin 是否来自管道或重定向（非终端）。
+// 用于判断是否应从 stdin 读取输入数据。
+func isStdinPipe() bool {
+	fi, err := os.Stdin.Stat()
+	if err != nil {
+		return false
+	}
+	return fi.Mode()&os.ModeCharDevice == 0
+}
+
+// isTerminal 检测 stdout 是否连接到终端（向后兼容）。
+func isTerminal() bool {
+	return isStdoutTTY()
 }
 
 // colorize 仅在终端模式下为文本添加颜色。
@@ -58,7 +73,7 @@ type CLITerminalReporter struct {
 }
 
 func NewCLITerminalReporter() *CLITerminalReporter {
-	return &CLITerminalReporter{isTTY: isTerminal()}
+	return &CLITerminalReporter{isTTY: isStdoutTTY()}
 }
 
 func (r *CLITerminalReporter) OnThinking(_ context.Context) {

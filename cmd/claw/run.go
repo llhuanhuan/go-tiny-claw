@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"os/signal"
 	"strings"
 
 	"github.com/lhuan/go-tiny-claw/internal/engine"
@@ -45,11 +46,14 @@ func newRunCmd() *cobra.Command {
 				prompt = strings.TrimSpace(string(data))
 			} else if len(args) > 0 {
 				prompt = strings.Join(args, " ")
-			} else if !isTerminal() {
+			} else if isStdinPipe() {
 				scanner := newScanner(os.Stdin)
 				var lines []string
 				for scanner.Scan() {
 					lines = append(lines, scanner.Text())
+				}
+				if err := scanner.Err(); err != nil {
+					return fmt.Errorf("读取 stdin 失败: %w", err)
 				}
 				prompt = strings.TrimSpace(strings.Join(lines, "\n"))
 			}
@@ -72,18 +76,29 @@ func newRunCmd() *cobra.Command {
 
 // runRun 执行单次任务的核心逻辑。
 func runRun(prompt, sessionID string) error {
-	cfg := DefaultConfig()
+	cfg, err := LoadConfig("claw.yaml")
+	if err != nil {
+		return fmt.Errorf("加载配置失败: %w", err)
+	}
 
 	b, err := Bootstrap(cfg)
 	if err != nil {
 		return fmt.Errorf("引擎初始化失败: %w", err)
 	}
+	defer func() {
+		if b.CancelFunc != nil {
+			b.CancelFunc()
+		}
+	}()
 
 	if sessionID == "" {
 		sessionID = "default"
 	}
 
-	ctx := context.Background()
+	// 支持 Ctrl+C 优雅取消
+	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
+	defer cancel()
+
 	session := engine.GlobalSessionMgr.GetOrCreate(sessionID, b.WorkDir)
 	reporter := NewCLITerminalReporter()
 
