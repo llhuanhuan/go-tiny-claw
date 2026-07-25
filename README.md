@@ -169,6 +169,48 @@ rules:
 - **Copy-on-Write**：读操作无锁，写操作原子替换，支持热重载
 - **17 条内置规则**：覆盖 `rm -rf`、`DROP DATABASE`、`kubectl delete namespace` 等
 
+### 分布式追踪（Tracing）
+
+Agent 的每次运行被建模为一棵 Span 树，完整记录 ReAct 循环中每个阶段的耗时和属性：
+
+```
+Agent.Run (8101ms)
+├── Turn-1 (3189ms)
+│   ├── LLM.Thinking (1281ms)
+│   ├── LLM.Action (1772ms)
+│   ├── Tool.Execute (15ms)   read_file
+│   └── Tool.Execute (120ms)  bash
+├── Turn-2 (2943ms)
+│   ├── LLM.Thinking (1364ms)
+│   ├── LLM.Action (1570ms)
+│   └── Tool.Execute (8ms)    write_file
+└── Turn-3 (1969ms)
+    └── LLM.Action (1969ms)
+```
+
+**Exporter 抽象层**：Trace 数据通过 `Exporter` 接口并行导出到多个后端：
+
+| Exporter | 输出目标 | 用途 |
+|----------|---------|------|
+| `FileExporter` | `.claw/traces/*.json` | 本地 JSON 回放 |
+| `OTelExporter` | Jaeger / Tempo / SigNoz | 甘特图可视化 |
+| `LogExporter` | 终端日志 | 调试用文本树 |
+
+**Jaeger 快速启动**：
+
+```bash
+# 方式一：Docker
+docker run -d --name jaeger \
+  -p 16686:16686 -p 4317:4317 \
+  jaegertracing/all-in-one:1.57
+
+# 方式二：本地二进制
+# 下载 https://github.com/jaegertracing/jaeger/releases
+./jaeger-all-in-one &
+
+# 浏览器打开 http://localhost:16686 → 服务选 'go-tiny-claw' → Find Traces
+```
+
 ## 测试
 
 ```bash
@@ -188,6 +230,7 @@ go test ./internal/engine/... -v -run TestIntegration
 go-tiny-claw/
 ├── cmd/claw/          # CLI 入口 + 配置加载
 ├── cmd/bench/         # Benchmark CLI
+├── cmd/trace-demo/    # Tracing 演示程序（模拟 3 轮 ReAct 循环）
 ├── internal/
 │   ├── engine/        # ReAct 循环、会话管理、子代理
 │   ├── provider/      # LLM Provider（Claude / OpenAI）+ 限流 + Mock

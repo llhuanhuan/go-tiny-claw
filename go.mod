@@ -6,6 +6,8 @@ require (
 	github.com/anthropics/anthropic-sdk-go v1.51.0
 	github.com/larksuite/oapi-sdk-go/v3 v3.9.6
 	github.com/openai/openai-go/v3 v3.41.0
+	github.com/peterh/liner v1.2.2
+	github.com/spf13/cobra v1.10.2
 	go.opentelemetry.io/otel v1.44.0
 	go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc v1.44.0
 	go.opentelemetry.io/otel/sdk v1.44.0
@@ -28,8 +30,6 @@ require (
 	github.com/invopop/jsonschema v0.14.0 // indirect
 	github.com/mattn/go-runewidth v0.0.3 // indirect
 	github.com/pb33f/ordered-map/v2 v2.3.1 // indirect
-	github.com/peterh/liner v1.2.2 // indirect
-	github.com/spf13/cobra v1.10.2 // indirect
 	github.com/spf13/pflag v1.0.9 // indirect
 	github.com/standard-webhooks/standard-webhooks/libraries v0.0.1 // indirect
 	github.com/tidwall/gjson v1.18.0 // indirect

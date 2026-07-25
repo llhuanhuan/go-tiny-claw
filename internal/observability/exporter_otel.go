@@ -7,7 +7,6 @@ import (
 	"log"
 	"time"
 
-	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc"
 	"go.opentelemetry.io/otel/sdk/resource"
@@ -30,6 +29,9 @@ type OTelExporter struct {
 
 // NewOTelExporter 创建一个 OTel 导出器。
 //
+// 注意：构造函数不会调用 otel.SetTracerProvider()，避免污染全局状态。
+// 如需全局注册，调用方应显式调用 otel.SetTracerProvider(exp.TracerProvider())。
+//
 // 参数：
 //   - ctx: 父上下文，用于控制初始化超时
 //   - endpoint: Jaeger Collector 的 OTLP gRPC 地址，如 "localhost:4317"
@@ -45,6 +47,7 @@ func NewOTelExporter(ctx context.Context, endpoint string, serviceName string) (
 	}
 
 	// 2. 创建 Resource（标识当前服务）
+	// resource.Merge 保留默认 Resource 的属性（host.name, os.type 等），同时追加自定义属性
 	res, err := resource.Merge(
 		resource.Default(),
 		resource.NewWithAttributes(
@@ -54,7 +57,9 @@ func NewOTelExporter(ctx context.Context, endpoint string, serviceName string) (
 		),
 	)
 	if err != nil {
-		return nil, fmt.Errorf("创建 Resource 失败: %w", err)
+		// resource.Merge 在 schema URL 版本不匹配时也会返回合并后的 res，
+		// 这类 warning 不应阻止初始化
+		log.Printf("[Tracing] ⚠️ Resource merge warning: %v (proceeding with merged result)\n", err)
 	}
 
 	// 3. 创建 TracerProvider（OTel 的核心管理器）
@@ -65,7 +70,8 @@ func NewOTelExporter(ctx context.Context, endpoint string, serviceName string) (
 		),
 		sdktrace.WithResource(res),
 	)
-	otel.SetTracerProvider(tp)
+	// 不再调用 otel.SetTracerProvider(tp)，避免全局副作用
+	// 调用方如需全局注册：otel.SetTracerProvider(exp.TracerProvider())
 
 	return &OTelExporter{
 		tracerProvider: tp,
@@ -73,11 +79,17 @@ func NewOTelExporter(ctx context.Context, endpoint string, serviceName string) (
 	}, nil
 }
 
+// TracerProvider 返回底层的 OTel TracerProvider，供高级用户自定义配置。
+// 例如：手动调用 otel.SetTracerProvider(exp.TracerProvider()) 进行全局注册。
+func (o *OTelExporter) TracerProvider() *sdktrace.TracerProvider {
+	return o.tracerProvider
+}
+
 // MustNewOTelExporter 是 NewOTelExporter 的 panic 版本，适合初始化阶段使用。
 func MustNewOTelExporter(ctx context.Context, endpoint string, serviceName string) *OTelExporter {
 	exp, err := NewOTelExporter(ctx, endpoint, serviceName)
 	if err != nil {
-		log.Fatalf("[Tracing] 创建 OTel Exporter 失败: %v", err)
+		panic(fmt.Sprintf("创建 OTel Exporter 失败: %v", err))
 	}
 	return exp
 }
@@ -85,7 +97,13 @@ func MustNewOTelExporter(ctx context.Context, endpoint string, serviceName strin
 // Export 递归遍历我们的 Span 树，将每个 Span 转换为 OTel Span。
 //
 // 关键：利用 OTel 的 parent context 维护父子关系 → Jaeger 甘特图自动渲染层级。
-func (o *OTelExporter) Export(ctx context.Context, rootSpan *Span) error {
+func (o *OTelExporter) Export(ctx context.Context, rootSpan *Span) (err error) {
+	// 防止 convertSpan 中的 panic（如 attribute 类型不支持）导致进程崩溃
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("OTel export panic: %v", r)
+		}
+	}()
 	o.convertSpan(ctx, rootSpan)
 	return nil
 }

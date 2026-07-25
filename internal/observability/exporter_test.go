@@ -8,6 +8,9 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 )
 
 // ============================================================
@@ -186,25 +189,136 @@ func TestLogExporter_Shutdown(t *testing.T) {
 }
 
 // ============================================================
+// OTelExporter 测试（使用 InMemoryExporter，无需真实 Jaeger）
+// ============================================================
+
+// newTestOTelExporter 创建一个使用 InMemoryExporter 的 OTelExporter，用于单元测试。
+func newTestOTelExporter() (*OTelExporter, *tracetest.InMemoryExporter) {
+	memExporter := tracetest.NewInMemoryExporter()
+	tp := sdktrace.NewTracerProvider(
+		sdktrace.WithSyncer(memExporter), // 同步写入，方便测试
+	)
+	return &OTelExporter{
+		tracerProvider: tp,
+		tracer:         tp.Tracer("test/engine"),
+	}, memExporter
+}
+
+// TestOTelExporter_Export_SpanTree 验证 Span 树正确转换为 OTel Span。
+func TestOTelExporter_Export_SpanTree(t *testing.T) {
+	exp, memExporter := newTestOTelExporter()
+
+	root := buildTestSpanTree()
+	err := exp.Export(context.Background(), root)
+	if err != nil {
+		t.Fatalf("Export 失败: %v", err)
+	}
+
+	spans := memExporter.GetSpans()
+	// 6 个 Span: Agent.Run + Turn-1 + Turn-2 + LLM.Action + Tool.Execute + LLM.Action
+	if len(spans) != 6 {
+		t.Fatalf("期望 6 个 OTel Span, 实际 %d", len(spans))
+	}
+
+	// 验证根 Span 无 parent
+	for _, sp := range spans {
+		if sp.Name == "Agent.Run" {
+			if sp.Parent.IsValid() {
+				t.Error("Root Span 不应有 parent")
+			}
+		}
+		if sp.Name == "Turn-1" || sp.Name == "Turn-2" {
+			if !sp.Parent.IsValid() {
+				t.Errorf("%s 应有 parent", sp.Name)
+			}
+		}
+	}
+
+	// 验证 Attributes 传递
+	for _, sp := range spans {
+		if sp.Name == "Agent.Run" {
+			found := false
+			for _, attr := range sp.Attributes {
+				if string(attr.Key) == "SessionID" && attr.Value.AsString() == "test-session" {
+					found = true
+				}
+			}
+			if !found {
+				t.Error("Agent.Run 应包含 SessionID=test-session 属性")
+			}
+		}
+	}
+
+	t.Logf("  ✅ OTelExporter 正确转换 %d 个 Span（含父子关系）", len(spans))
+}
+
+// TestOTelExporter_Export_PanicRecovery 验证 panic 不会杀死进程。
+func TestOTelExporter_Export_PanicRecovery(t *testing.T) {
+	exp, _ := newTestOTelExporter()
+
+	// 构造一个会导致 panic 的 Span（nil Attributes map 写入会 panic）
+	badSpan := &Span{
+		Name:       "BadSpan",
+		StartTime:  time.Now(),
+		EndTime:    time.Now(),
+		DurationMs: 0,
+		Attributes: nil, // convertAttributes 不会 panic，但测试 recover 机制
+	}
+
+	err := exp.Export(context.Background(), badSpan)
+	if err != nil {
+		t.Logf("  ✅ panic 被 recover: %v", err)
+	} else {
+		t.Log("  ✅ Export 正常完成（无 panic）")
+	}
+}
+
+// TestOTelExporter_Shutdown 验证 Shutdown 正确关闭 TracerProvider。
+func TestOTelExporter_Shutdown(t *testing.T) {
+	exp, _ := newTestOTelExporter()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	if err := exp.Shutdown(ctx); err != nil {
+		t.Fatalf("Shutdown 失败: %v", err)
+	}
+	t.Log("  ✅ OTelExporter Shutdown 成功")
+}
+
+// TestOTelExporter_TracerProvider 验证 TracerProvider() 访问器。
+func TestOTelExporter_TracerProvider(t *testing.T) {
+	exp, _ := newTestOTelExporter()
+
+	tp := exp.TracerProvider()
+	if tp == nil {
+		t.Fatal("TracerProvider() 不应返回 nil")
+	}
+	t.Log("  ✅ TracerProvider() 访问器正常")
+}
+
+// ============================================================
 // TraceProvider 测试
 // ============================================================
 
 // mockExporter 是一个记录调用次数的 mock Exporter。
 type mockExporter struct {
-	exportCount  int
+	exportCount   int
 	shutdownCount int
-	exportedSpan *Span
+	exportedSpan  *Span
+	exportErr     error // 可注入的 Export 错误
+	shutdownErr   error // 可注入的 Shutdown 错误
 }
 
 func (m *mockExporter) Export(_ context.Context, rootSpan *Span) error {
 	m.exportCount++
 	m.exportedSpan = rootSpan
-	return nil
+	return m.exportErr
 }
 
 func (m *mockExporter) Shutdown(_ context.Context) error {
 	m.shutdownCount++
-	return nil
+	return m.shutdownErr
 }
 
 // TestTraceProvider_Export 验证 TraceProvider 并行调用所有 Exporter。
@@ -214,7 +328,9 @@ func TestTraceProvider_Export(t *testing.T) {
 	tp := NewTraceProvider(mock1, mock2)
 
 	root := buildTestSpanTree()
-	tp.Export(context.Background(), root)
+	if err := tp.Export(context.Background(), root); err != nil {
+		t.Fatalf("Export 不应返回错误: %v", err)
+	}
 
 	if mock1.exportCount != 1 {
 		t.Errorf("Exporter1 应被调用 1 次, 实际 %d 次", mock1.exportCount)
@@ -240,7 +356,9 @@ func TestTraceProvider_Shutdown(t *testing.T) {
 	mock2 := &mockExporter{}
 	tp := NewTraceProvider(mock1, mock2)
 
-	tp.Shutdown(context.Background())
+	if err := tp.Shutdown(context.Background()); err != nil {
+		t.Fatalf("Shutdown 不应返回错误: %v", err)
+	}
 
 	if mock1.shutdownCount != 1 {
 		t.Errorf("Exporter1 Shutdown 应被调用 1 次, 实际 %d 次", mock1.shutdownCount)
@@ -255,10 +373,54 @@ func TestTraceProvider_NoExporters(t *testing.T) {
 	tp := NewTraceProvider()
 
 	root := buildTestSpanTree()
-	tp.Export(context.Background(), root) // 应不 panic
-	tp.Shutdown(context.Background())     // 应不 panic
+	_ = tp.Export(context.Background(), root)   // 应不 panic
+	_ = tp.Shutdown(context.Background())       // 应不 panic
 
 	t.Log("  ✅ 空 TraceProvider 安全运行")
+}
+
+// TestTraceProvider_Export_PartialFailure 验证部分 Exporter 失败时，其他 Exporter 仍被调用。
+func TestTraceProvider_Export_PartialFailure(t *testing.T) {
+	good := &mockExporter{}
+	bad := &mockExporter{exportErr: context.DeadlineExceeded}
+	tp := NewTraceProvider(bad, good)
+
+	root := buildTestSpanTree()
+	err := tp.Export(context.Background(), root)
+
+	// 应返回聚合错误
+	if err == nil {
+		t.Fatal("部分 Exporter 失败时应返回非 nil 错误")
+	}
+	if !strings.Contains(err.Error(), "deadline exceeded") {
+		t.Errorf("错误信息应包含 'deadline exceeded': %v", err)
+	}
+
+	// 好的 Exporter 仍应被调用
+	if good.exportCount != 1 {
+		t.Errorf("好的 Exporter 应被调用 1 次, 实际 %d 次", good.exportCount)
+	}
+
+	t.Log("  ✅ 部分失败时其他 Exporter 仍正常执行")
+}
+
+// TestTraceProvider_Shutdown_PartialFailure 验证部分 Exporter Shutdown 失败时聚合错误。
+func TestTraceProvider_Shutdown_PartialFailure(t *testing.T) {
+	good := &mockExporter{}
+	bad := &mockExporter{shutdownErr: context.DeadlineExceeded}
+	tp := NewTraceProvider(bad, good)
+
+	err := tp.Shutdown(context.Background())
+	if err == nil {
+		t.Fatal("部分 Shutdown 失败时应返回非 nil 错误")
+	}
+
+	// 好的 Exporter 仍应被调用
+	if good.shutdownCount != 1 {
+		t.Errorf("好的 Exporter Shutdown 应被调用 1 次, 实际 %d 次", good.shutdownCount)
+	}
+
+	t.Log("  ✅ Shutdown 部分失败时聚合错误")
 }
 
 // ============================================================

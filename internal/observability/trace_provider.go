@@ -3,7 +3,8 @@ package observability
 
 import (
 	"context"
-	"log"
+	"errors"
+	"fmt"
 	"sync"
 )
 
@@ -36,31 +37,43 @@ func NewTraceProvider(exporters ...Exporter) *TraceProvider {
 }
 
 // Export 将 Span 树并行导出到所有已注册的 Exporter。
-// 每个 Exporter 在独立的 goroutine 中运行，互不阻塞。
-func (tp *TraceProvider) Export(ctx context.Context, rootSpan *Span) {
+// 每个 Exporter 在独立的 goroutine 中运行，通过 WaitGroup 保证全部完成后才返回。
+// 返回聚合错误（errors.Join），调用方可选择忽略：_ = tp.Export(ctx, rootSpan)
+func (tp *TraceProvider) Export(ctx context.Context, rootSpan *Span) error {
 	if len(tp.exporters) == 0 {
-		return
+		return nil
 	}
 
-	var wg sync.WaitGroup
+	var (
+		wg   sync.WaitGroup
+		errs []error
+		mu   sync.Mutex
+	)
+
 	for _, exp := range tp.exporters {
 		wg.Add(1)
 		go func(e Exporter) {
 			defer wg.Done()
 			if err := e.Export(ctx, rootSpan); err != nil {
-				log.Printf("[Tracing] ⚠️ Exporter %T 导出失败: %v\n", e, err)
+				mu.Lock()
+				errs = append(errs, fmt.Errorf("exporter %T: %w", e, err))
+				mu.Unlock()
 			}
 		}(exp)
 	}
 	wg.Wait() // 等待所有 Exporter 完成，防止引擎退出时数据丢失
+
+	return errors.Join(errs...)
 }
 
 // Shutdown 优雅关闭所有 Exporter，刷新各自的缓冲区。
-// 应在引擎退出时调用（defer）。
-func (tp *TraceProvider) Shutdown(ctx context.Context) {
+// 返回聚合错误（errors.Join），调用方可选择忽略：_ = tp.Shutdown(ctx)
+func (tp *TraceProvider) Shutdown(ctx context.Context) error {
+	var errs []error
 	for _, exp := range tp.exporters {
 		if err := exp.Shutdown(ctx); err != nil {
-			log.Printf("[Tracing] ⚠️ Exporter %T 关闭失败: %v\n", exp, err)
+			errs = append(errs, fmt.Errorf("shutdown %T: %w", exp, err))
 		}
 	}
+	return errors.Join(errs...)
 }

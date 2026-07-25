@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 
 	ctxpkg "github.com/lhuan/go-tiny-claw/internal/context"
 
@@ -134,10 +135,18 @@ func (e *AgentEngine) Run(ctx context.Context, session *Session, userPrompt stri
 	)
 
 	// defer 保证在引擎退出时，无论成功失败，都能结束根 Span 并导出 Trace 报告
+	// 使用独立 context 带超时：即使原始 ctx 被取消（如用户 Ctrl+C），
+	// 导出操作仍有 10s 窗口完成，避免数据丢失。
 	defer func() {
 		rootSpan.EndSpan()
-		traceProvider.Export(ctx, rootSpan)
-		traceProvider.Shutdown(ctx)
+		flushCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := traceProvider.Export(flushCtx, rootSpan); err != nil {
+			log.Printf("[Tracing] ⚠️ 部分 Exporter 导出失败: %v\n", err)
+		}
+		if err := traceProvider.Shutdown(flushCtx); err != nil {
+			log.Printf("[Tracing] ⚠️ 部分 Exporter 关闭失败: %v\n", err)
+		}
 		log.Printf("📊 [Tracing] 本次任务的执行回放链路已保存至工作区的 .claw/traces 目录下\n")
 	}()
 
@@ -771,13 +780,14 @@ func (e *AgentEngine) RunSub(ctx context.Context, taskPrompt string, readOnlyReg
 	for {
 		turnCount++
 		if turnCount > maxSubTurns {
+			// 上一轮的 turnSpan 已在循环末尾 EndSpan()，无需额外处理
 			return "", fmt.Errorf("子智能体探索过于深入，已超过 %d 轮限制被强制召回，请给它更明确的指令", maxSubTurns)
 		}
 
 		// 【埋点 2】：记录单次 Turn 循环
 		turnCtx, turnSpan := observability.StartSpan(ctx, fmt.Sprintf("Turn-%d", turnCount))
-
-		defer turnSpan.EndSpan() // 利用 defer，哪怕遇到了 break 或 error 也会计算耗时
+		// 注意：不能用 defer turnSpan.EndSpan()，因为 defer 是函数级的，
+		// 会导致所有 Turn 的 EndTime 延迟到 RunSub 返回时才记录，Duration 全部错误。
 
 		// 【驾驭底线】：子智能体仅能获取传入的只读工具注册表
 		availableTools := readOnlyRegistry.GetAvailableTools()
@@ -794,7 +804,8 @@ func (e *AgentEngine) RunSub(ctx context.Context, taskPrompt string, readOnlyReg
 
 		// 【核心退出条件】：子智能体一旦不调用工具了，说明它做好了总结汇报
 		if len(actionResp.ToolCalls) == 0 {
-			// 直接将它的这段汇报内容剥离出来返回给上层
+			// 直接将它的汇报内容剥离出来返回给上层
+			turnSpan.EndSpan()
 			return actionResp.Content, nil
 		}
 
@@ -839,5 +850,7 @@ func (e *AgentEngine) RunSub(ctx context.Context, taskPrompt string, readOnlyReg
 
 		wg.Wait()
 		contextHistory = append(contextHistory, observationMsgs...)
+
+		turnSpan.EndSpan() // 结束本轮 Turn（进入下一轮前）
 	}
 }
