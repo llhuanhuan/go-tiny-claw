@@ -22,3 +22,7 @@ config.yaml
 .DS_Store
 Thumbs.db
 internal/eval/workspace/
+
+# Jaeger 二进制（133MB，不应提交到 git）
+jaeger.tar.gz
+jaeger-*/
