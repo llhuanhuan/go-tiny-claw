@@ -38,8 +38,14 @@ go build -o claw ./cmd/claw
 
 # 2. 配置
 cp config.yaml.example config.yaml
-# 编辑 config.yaml 填入模型名称，或设置环境变量：
+# 编辑 config.yaml 填入模型名称，然后设置环境变量（二选一）：
+# 方式 A：Anthropic Claude
+export ANTHROPIC_BASE_URL="https://api.anthropic.com"
 export ANTHROPIC_API_KEY="sk-ant-..."
+# 方式 B：OpenAI 兼容（DeepSeek、智谱、中转站等）
+export OPENAI_BASE_URL="https://api.deepseek.com/"
+export OPENAI_API_KEY="sk-..."
+export OPENAI_MODEL="deepseek-chat"
 
 # 3. 运行
 ./claw run "分析当前目录的代码结构"
@@ -138,9 +144,12 @@ cat error.log | ./claw run "分析错误日志"
 # 企业微信模式 — 设置 config.yaml 中的 wechat.webhook_url 后
 ./claw server
 
-# Docker
+# Docker（Anthropic Claude）
 docker build -t go-tiny-claw .
-docker run -e ANTHROPIC_API_KEY=sk-... go-tiny-claw run "hello"
+docker run -e ANTHROPIC_BASE_URL=https://api.anthropic.com -e ANTHROPIC_API_KEY=sk-... go-tiny-claw run "hello"
+
+# Docker（OpenAI 兼容，如 DeepSeek）
+docker run -e OPENAI_BASE_URL=https://api.deepseek.com/ -e OPENAI_API_KEY=sk-... -e OPENAI_MODEL=deepseek-chat go-tiny-claw run "hello"
 ```
 
 </details>
@@ -148,16 +157,18 @@ docker run -e ANTHROPIC_API_KEY=sk-... go-tiny-claw run "hello"
 <details>
 <summary><strong>支持的模型</strong></summary>
 
-通过环境变量切换 Provider：
+通过环境变量切换 Provider（代码只判断 `ANTHROPIC_BASE_URL` / `OPENAI_BASE_URL` 两条路径）：
 
-| Provider | 环境变量 | 模型示例 |
-|----------|---------|---------|
-| Anthropic Claude | `ANTHROPIC_API_KEY` | claude-sonnet-4-20250514 |
-| DeepSeek | `DEEPSEEK_API_KEY` | deepseek-chat |
-| 智谱 GLM | `ZHIPU_API_KEY` | glm-4.5-air |
-| 任意 OpenAI 兼容 | `OPENAI_BASE_URL` + `OPENAI_API_KEY` | — |
+| Provider | 必需环境变量 | 可选环境变量 | 模型示例 |
+|----------|-------------|-------------|---------|
+| Anthropic Claude | `ANTHROPIC_BASE_URL` + (`ANTHROPIC_API_KEY` 或 `ANTHROPIC_AUTH_TOKEN`) | `ANTHROPIC_MODEL` | claude-sonnet-4-20250514 |
+| DeepSeek | `OPENAI_BASE_URL` + `OPENAI_API_KEY` | `OPENAI_MODEL` | deepseek-chat |
+| 智谱 GLM | `OPENAI_BASE_URL` + `OPENAI_API_KEY` | `OPENAI_MODEL` | glm-4.5-air |
+| 任意 OpenAI 兼容 | `OPENAI_BASE_URL` + `OPENAI_API_KEY` | `OPENAI_MODEL` | — |
 
-也可通过 `~/.claude/settings.json` 自动注入环境变量（与 Claude Code 配置集成）。
+> **注意**：DeepSeek、智谱等兼容 OpenAI 协议的 Provider 统一通过 `OPENAI_BASE_URL` 接入，没有单独的 `DEEPSEEK_API_KEY` 或 `ZHIPU_API_KEY`。
+>
+> 也可通过 `~/.claude/settings.json` 的 `env` 字段自动注入环境变量（与 Claude Code 配置集成）。
 
 </details>
 
