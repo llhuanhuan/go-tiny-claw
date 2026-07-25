@@ -25,4 +25,4 @@ jobs:
         run: go vet ./...
 
       - name: Test
-        run: go test ./internal/tools/... ./internal/context/... ./internal/permissions/... ./internal/observability/... -count=1 -timeout 60s
+        run: go test ./internal/tools/... ./internal/context/... ./internal/permissions/... ./internal/observability/... ./internal/engine/... ./internal/provider/... ./internal/feishu/... -count=1 -timeout 120s

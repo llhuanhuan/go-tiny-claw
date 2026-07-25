@@ -305,13 +305,13 @@ docker run -d --name jaeger \
 ## 测试
 
 ```bash
-# 单元测试（无需 API Key）
-go test ./internal/tools/... ./internal/context/... ./internal/permissions/... -v
+# 单元测试（无需 API Key，CI 自动运行）
+go test ./internal/tools/... ./internal/context/... ./internal/permissions/... ./internal/observability/... ./internal/engine/... ./internal/provider/... ./internal/feishu/... -v
 
-# 全量验证
+# 全量验证（含 go vet）
 go build ./... && go vet ./... && go test ./internal/...
 
-# 集成测试（需要 API Key）
+# 集成测试（需要 API Key，CI 环境自动跳过）
 go test ./internal/engine/... -v -run TestIntegration
 ```
 
