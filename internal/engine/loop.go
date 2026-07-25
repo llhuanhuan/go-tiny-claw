@@ -126,10 +126,18 @@ func (e *AgentEngine) Run(ctx context.Context, session *Session, userPrompt stri
 	rootSpan.AddAttribute("SessionID", session.ID)
 	rootSpan.AddAttribute("WorkDir", session.WorkDir)
 
+	// 创建 TraceProvider：注册所有 Exporter（文件 + 日志）
+	// OTelExporter 可通过配置启用（需 Jaeger 运行在 localhost:4317）
+	traceProvider := observability.NewTraceProvider(
+		observability.NewFileExporter(session.WorkDir, session.ID),
+		observability.NewLogExporter(),
+	)
+
 	// defer 保证在引擎退出时，无论成功失败，都能结束根 Span 并导出 Trace 报告
 	defer func() {
 		rootSpan.EndSpan()
-		_ = observability.ExportTraceToFile(rootSpan, session.WorkDir, session.ID)
+		traceProvider.Export(ctx, rootSpan)
+		traceProvider.Shutdown(ctx)
 		log.Printf("📊 [Tracing] 本次任务的执行回放链路已保存至工作区的 .claw/traces 目录下\n")
 	}()
 

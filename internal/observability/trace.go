@@ -3,10 +3,6 @@ package observability
 
 import (
 	"context"
-	"encoding/json"
-	"fmt"
-	"os"
-	"path/filepath"
 	"sync"
 	"time"
 )
@@ -57,20 +53,4 @@ func (s *Span) AddAttribute(key string, value interface{}) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.Attributes[key] = value
-}
-
-// ExportTraceToFile 当整个根 Span 结束时，将其序列化并保存为本地 JSON 文件
-func ExportTraceToFile(rootSpan *Span, workDir string, sessionID string) error {
-	traceDir := filepath.Join(workDir, ".claw", "traces")
-	os.MkdirAll(traceDir, 0755)
-
-	filename := filepath.Join(traceDir, fmt.Sprintf("trace_%s_%d.json", sessionID, time.Now().Unix()))
-
-	// 美化输出 JSON，便于人类和工具阅读
-	data, err := json.MarshalIndent(rootSpan, "", "  ")
-	if err != nil {
-		return err
-	}
-
-	return os.WriteFile(filename, data, 0644)
 }
