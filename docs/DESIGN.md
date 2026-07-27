@@ -42,7 +42,8 @@
 ├──────────────────────────────────────────────────────┤
 │                 Tools Layer                           │
 │  read/write/edit_file · bash · search_files           │
-│  fetch_url · spawn_subagent · read_skill              │
+│  fetch_url · spawn/check_subagent · read_skill        │
+│  task_output · task_stop                              │
 ├──────────────────────────────────────────────────────┤
 │              Permissions Layer                        │
 │     COW Engine · Regex Hot Reload · Approval          │
@@ -217,7 +218,7 @@ Check(ctx, command)
 - 飞书模式：`FeishuApprovalHandler`（阻塞等待飞书审批卡片）
 - 权限配置文件不存在时默认 allow，不阻塞正常使用
 
-**内置安全规则**：17 条预置规则覆盖 `rm -rf`、`DROP DATABASE`、`kubectl delete namespace` 等危险操作。
+**内置安全规则**：14 条预置规则覆盖 `rm -rf`、`DROP DATABASE`、`kubectl delete namespace` 等危险操作（5 deny + 5 ask + 4 allow）。
 
 ---
 
@@ -335,7 +336,7 @@ Phase 6: 工程化
 
 ### Phase 4: 多平台接入
 
-飞书 WebSocket 长连接（无需公网 IP）、企业微信 HTTP Webhook。Reporter 接口统一抽象，引擎不感知底层平台。
+飞书 WebSocket 长连接（无需公网 IP）、企业微信（Group Bot Webhook + Custom App 回调）。Reporter 接口统一抽象，引擎不感知底层平台。
 
 ### Phase 5: 上下文工程
 
