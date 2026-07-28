@@ -175,32 +175,45 @@ docker run -e OPENAI_BASE_URL=https://api.deepseek.com/ -e OPENAI_API_KEY=sk-...
 ## 架构
 
 ```
-┌──────────────────────────────────────────────────────┐
-│                  CLI Layer (cobra)                     │
-│   run · repl · feishu · server · session · config     │
-├──────────────────────────────────────────────────────┤
-│                 Platform Layer                        │
-│     Bootstrap · CLITerminalReporter · Pipe Mode       │
-├──────────────────────────────────────────────────────┤
-│                 Engine Layer                          │
-│      ReAct Loop · Session (JSONL) · Subagent          │
-├──────────────────────────────────────────────────────┤
-│                Context Layer                          │
-│   PromptComposer · Compactor (5-level) · Recovery     │
-├──────────────────────────────────────────────────────┤
-│                 Tools Layer                           │
-│  read/write/edit_file · bash · search_files           │
-│  fetch_url · spawn_subagent · read_skill              │
-├──────────────────────────────────────────────────────┤
-│              Permissions Layer                        │
-│     COW Engine · Regex Hot Reload · Approval          │
-├──────────────────────────────────────────────────────┤
-│             Observability Layer                       │
-│        CostTracker · Distributed Tracing              │
-├──────────────────────────────────────────────────────┤
-│               Provider Layer                          │
-│       Anthropic Claude · OpenAI Compatible             │
-└──────────────────────────────────────────────────────┘
+┌───────────────────────────────────────────────────────────────────────────────────┐
+│                        入口交互层  Entry & UI Layer                                 │
+│                                                                                   │
+│    CLI (cobra)            飞书 Bot               企业微信 Bot                       │
+│    run · repl ·           WebSocket              Webhook                           │
+│    server · feishu        长连接 · 审批卡片       回调 · 审批                        │
+│                                                                                   │
+│                统一 Reporter 接口：Terminal · Feishu · WeChat                       │
+│                Bootstrap 引擎初始化栈 · 管道模式 · ANSI 终端输出                      │
+├───────────────────────────────────────────────────────────────────────────────────┤
+│                        核心引擎层  Core Engine Layer                                │
+│                                                                                   │
+│    ReAct 循环              Provider 适配           Schema 定义层                     │
+│    Thinking + Action       Claude · OpenAI         Message · ToolCall              │
+│    并行/串行工具执行       重试 · 限流 · Mock       ToolResult · TokenUsage          │
+│    死循环检测              StreamAccumulator                                       │
+│                                                                                   │
+│               Session 管理：JSONL 持久化 · 多用户隔离 · 断点续跑                     │
+│               Subagent 调度：异步 spawn · context 取消传播 · 自动通知                │
+├───────────────────────────────────────────────────────────────────────────────────┤
+│                     上下文工程层  Context Engineering Layer                          │
+│                                                                                   │
+│    PromptComposer          Compactor              可观测性                          │
+│    三段式 System Prompt    5 级自适应压缩         CostTracker 费用追踪               │
+│    技能元数据索引          Token 利用率驱动       Span 树分布式追踪                  │
+│    RecoveryManager         SkillLoader            File · Log · OTel Exporter       │
+│                                                                                   │
+│               错误恢复注入 · 渐进式技能暴露 · 压缩级别自动切换                       │
+├───────────────────────────────────────────────────────────────────────────────────┤
+│                     工具与执行层  Tool Execution Layer                               │
+│                                                                                   │
+│    11 个内置工具            权限引擎               子代理系统                        │
+│    read/write/edit_file    COW 无锁读取           SubagentManager                  │
+│    bash · search_files     正则热重载             只读隔离 · context 传播            │
+│    fetch_url · read_skill  14 条内置规则          后台进程 PCB 模型                  │
+│    spawn/check_subagent    审批流集成             TaskManager · RingBuffer          │
+│                                                                                   │
+│              只读并行(信号量=5) · 写入串行 · Workspace RWMutex                      │
+└───────────────────────────────────────────────────────────────────────────────────┘
 ```
 
 ## 内置工具
