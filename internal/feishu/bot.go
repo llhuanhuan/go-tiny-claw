@@ -71,10 +71,10 @@ type FeishuBot struct {
 	client    *lark.Client // API 客户端（用于发送消息）
 	appID     string
 	appSecret string
-	workDir   string              // 工作区路径
-	factory   AgentEngineFactory  // 工厂模式：per-session 创建引擎
-	wsClient  *larkws.Client      // WebSocket 长连接客户端
-	botName   string              // 机器人名称（从飞书 API 自动获取）
+	workDir   string             // 工作区路径
+	factory   AgentEngineFactory // 工厂模式：per-session 创建引擎
+	wsClient  *larkws.Client     // WebSocket 长连接客户端
+	botName   string             // 机器人名称（从飞书 API 自动获取）
 
 	// 任务控制：追踪每个会话的运行中任务，支持 /stop 中断
 	runningTasks   map[string]context.CancelFunc
@@ -291,13 +291,13 @@ func (b *FeishuBot) runAgent(chatID string, prompt string) {
 // =============================================================================
 
 type FeishuReporter struct {
-	client          *lark.Client
-	chatID          string
-	streamMsgID     string         // 流式推送的消息 ID（首次发送后获取）
-	streamBuf       strings.Builder // 流式文本缓冲区
-	streamMu        sync.Mutex     // 保护 streamBuf
-	lastFlushLen    int            // 上次推送时的文本长度
-	isStreaming     bool           // 是否正在流式推送
+	client       *lark.Client
+	chatID       string
+	streamMsgID  string          // 流式推送的消息 ID（首次发送后获取）
+	streamBuf    strings.Builder // 流式文本缓冲区
+	streamMu     sync.Mutex      // 保护 streamBuf
+	lastFlushLen int             // 上次推送时的文本长度
+	isStreaming  bool            // 是否正在流式推送
 }
 
 // sendMsg 发送文本消息，返回消息 ID（用于后续流式更新）。
@@ -325,10 +325,53 @@ func (r *FeishuReporter) sendMsg(text string) string {
 	return ""
 }
 
-// patchMsg 更新已发送的消息内容（飞书 PATCH API）。
+// sendCard 发送卡片消息（interactive card），返回消息 ID（用于后续流式更新）。
+// 飞书 Patch API 仅支持更新卡片消息，纯文本消息无法更新。
+func (r *FeishuReporter) sendCard(text string) string {
+	// 构建卡片 JSON 结构
+	card := map[string]interface{}{
+		"elements": []map[string]interface{}{
+			{
+				"tag":     "markdown",
+				"content": text,
+			},
+		},
+	}
+	b, _ := json.Marshal(card)
+
+	req := larkim.NewCreateMessageReqBuilder().
+		ReceiveIdType("chat_id").
+		Body(larkim.NewCreateMessageReqBodyBuilder().
+			ReceiveId(r.chatID).
+			MsgType("interactive").
+			Content(string(b)).
+			Build()).
+		Build()
+
+	resp, err := r.client.Im.V1.Message.Create(context.Background(), req)
+	if err != nil {
+		log.Printf("[Feishu] 发送卡片消息失败: %v", err)
+		return ""
+	}
+	if resp.Data != nil && resp.Data.MessageId != nil {
+		return *resp.Data.MessageId
+	}
+	return ""
+}
+
+// patchMsg 更新已发送的卡片消息内容（飞书 PATCH API）。
+// 注意：Patch API 仅支持 interactive 类型的卡片消息。
 func (r *FeishuReporter) patchMsg(msgID string, text string) {
-	content := map[string]string{"text": text}
-	b, _ := json.Marshal(content)
+	// 构建更新后的卡片 JSON
+	card := map[string]interface{}{
+		"elements": []map[string]interface{}{
+			{
+				"tag":     "markdown",
+				"content": text,
+			},
+		},
+	}
+	b, _ := json.Marshal(card)
 
 	req := larkim.NewPatchMessageReqBuilder().
 		MessageId(msgID).
@@ -339,7 +382,7 @@ func (r *FeishuReporter) patchMsg(msgID string, text string) {
 
 	_, err := r.client.Im.V1.Message.Patch(context.Background(), req)
 	if err != nil {
-		log.Printf("[Feishu] 更新消息失败: %v", err)
+		log.Printf("[Feishu] 更新卡片消息失败: %v", err)
 	}
 }
 
@@ -347,10 +390,10 @@ func (r *FeishuReporter) OnStreamDelta(ctx context.Context, delta string, isThin
 	r.streamMu.Lock()
 	defer r.streamMu.Unlock()
 
-	// 首次收到流式数据时，发送初始消息获取 message_id
+	// 首次收到流式数据时，发送初始卡片消息获取 message_id
 	if !r.isStreaming {
 		r.isStreaming = true
-		r.streamMsgID = r.sendMsg("🤖 正在生成回复...")
+		r.streamMsgID = r.sendCard("🤔 正在思考...")
 		r.lastFlushLen = 0
 	}
 
@@ -366,8 +409,9 @@ func (r *FeishuReporter) OnStreamDelta(ctx context.Context, delta string, isThin
 	}
 }
 
+// OnThinking 当模型开始慢思考时调用。
 func (r *FeishuReporter) OnThinking(ctx context.Context) {
-	// 流式模式下不单独发"慢思考"消息，由 OnStreamDelta 统一处理
+	r.sendMsg("🤔 正在深度思考中...")
 }
 
 func (r *FeishuReporter) OnToolCall(ctx context.Context, toolName string, args string) {
@@ -385,6 +429,8 @@ func (r *FeishuReporter) OnToolResult(ctx context.Context, toolName string, resu
 	}
 }
 
+// OnMessage 当模型输出最终纯文本回答时调用。
+// 如果正在流式推送，更新卡片消息为最终内容；否则直接发送纯文本。
 func (r *FeishuReporter) OnMessage(ctx context.Context, content string) {
 	const maxLen = 30000
 	if len(content) > maxLen {
@@ -395,14 +441,14 @@ func (r *FeishuReporter) OnMessage(ctx context.Context, content string) {
 	defer r.streamMu.Unlock()
 
 	if r.isStreaming && r.streamMsgID != "" {
-		// 流式模式：最终更新消息为完整内容
+		// 流式模式：最终更新卡片为完整内容
 		r.patchMsg(r.streamMsgID, content)
 		r.isStreaming = false
 		r.streamBuf.Reset()
 		r.streamMsgID = ""
 		r.lastFlushLen = 0
 	} else {
-		// 非流式模式（无 delta 输出时）：直接发送
+		// 非流式模式（无 delta 输出时）：直接发送纯文本
 		r.sendMsg(content)
 	}
 }

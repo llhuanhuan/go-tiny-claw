@@ -20,14 +20,14 @@
 | 语言 | TypeScript | Python | **Go（单二进制，零依赖部署）** |
 | 部署 | 需要 Node.js 运行时 | 需要 Python 运行时 | **`scp claw && ./claw`** |
 | 模型 | 仅 Anthropic | 多模型 | **Anthropic + OpenAI 兼容** |
-| 平台接入 | 终端 | 终端 | **终端 + 飞书 + 企业微信** |
+| 平台接入 | 终端 | 终端 | **终端 + 飞书 + 个人微信 + 企业微信（⚠️ 尚未实测）** |
 | 权限控制 | 简单 allow/deny | 无 | **COW 引擎 + 正则热重载 + 审批流** |
 | 会话持久化 | 本地 SQLite | 无 | **JSONL + 断点续跑** |
 | 子代理 | 无 | 无 | **异步 spawn + 自动通知** |
 | 上下文压缩 | 基础截断 | 基础截断 | **5 级自适应（基于 Token 利用率）** |
 | 后台进程 | 无 | 无 | **OS PCB 模型，全生命周期管理** |
 
-**一句话**：如果你需要一个可以部署到任意服务器、接入飞书/微信、支持多模型、具备完整权限控制的 AI Agent 引擎，go-tiny-claw 是目前唯一的 Go 原生方案。
+**一句话**：如果你需要一个可以部署到任意服务器、接入飞书/个人微信、支持多模型、具备完整权限控制的 AI Agent 引擎，go-tiny-claw 是目前唯一的 Go 原生方案。
 
 ## 快速开始
 
@@ -86,8 +86,10 @@ cat error.log | ./claw run "分析错误日志"
 |------|------|
 | `claw run [prompt]` | 单次执行任务 |
 | `claw repl` | 启动交互式 REPL |
+| `claw serve --feishu --ilink` | 同时启动多个消息渠道 |
 | `claw feishu` | 启动飞书 Bot |
-| `claw server` | 启动 HTTP API 服务 |
+| `claw ilink` | 启动 iLink Bot（个人微信） |
+| `claw server` | 启动 HTTP API 服务（企业微信，⚠️ 尚未实测） |
 | `claw session list` | 列出所有会话 |
 | `claw session clean [id]` | 清理会话数据 |
 | `claw config show` | 显示当前配置 |
@@ -143,8 +145,14 @@ cat error.log | ./claw run "分析错误日志"
 # 飞书模式 — 设置 config.yaml 中的 feishu.app_id 后
 ./claw feishu
 
-# 企业微信模式 — 设置 config.yaml 中的 wechat.webhook_url 后
-./claw server
+# 个人微信模式 — 设置 config.yaml 中的 ilink.token 后
+./claw ilink
+
+# 同时启动飞书和个人微信
+./claw serve --feishu --ilink
+
+# 企业微信模式 — ⚠️ 尚未实测
+# ./claw server
 
 # Docker（Anthropic Claude）
 docker build -t go-tiny-claw .
@@ -182,9 +190,10 @@ docker run -e OPENAI_BASE_URL=https://api.deepseek.com/ -e OPENAI_API_KEY=sk-...
 ┌───────────────────────────────────────────────────────────────────────────────────┐
 │                        入口交互层  Entry & UI Layer                                 │
 │                                                                                   │
-│    CLI (cobra)            飞书 Bot               企业微信 Bot                       │
-│    run · repl ·           WebSocket              Webhook                           │
-│    server · feishu        长连接 · 审批卡片       回调 · 审批                        │
+│    CLI (cobra)            飞书 Bot          个人微信 Bot        企业微信 Bot         │
+│    run · repl ·           WebSocket         iLink HTTP          Webhook             │
+│    server · feishu        长连接 · 审批卡片  长轮询 · DM         回调 · 审批           │
+│    serve · ilink                                            (⚠️ 尚未实测)          │
 │                                                                                   │
 │                统一 Reporter 接口：Terminal · Feishu · WeChat                       │
 │                Bootstrap 引擎初始化栈 · 管道模式 · ANSI 终端输出                      │
@@ -344,7 +353,9 @@ go-tiny-claw/
 │   ├── bootstrap.go      # 引擎初始化栈（Provider → Permissions → Tools → Engine）
 │   ├── terminal.go       # ANSI 终端输出 + 管道安全检测
 │   ├── config.go         # 配置结构定义
+│   ├── serve_cmd.go      # `claw serve` 多渠道并发
 │   ├── feishu_cmd.go     # `claw feishu` 子命令
+│   ├── ilink_cmd.go      # `claw ilink` 子命令
 │   ├── server_cmd.go     # `claw server` 子命令
 │   ├── session_cmd.go    # `claw session list/clean` 子命令
 │   ├── config_cmd.go     # `claw config show/init` 子命令
@@ -360,6 +371,7 @@ go-tiny-claw/
 │   ├── permissions/      # 动态权限引擎（COW + 热重载）
 │   ├── observability/    # 费用追踪 + 分布式追踪
 │   ├── feishu/           # 飞书 Bot + 审批
+│   ├── ilink/            # iLink Bot（个人微信）
 │   ├── wechat/           # 企业微信 Bot
 │   └── eval/             # Benchmark 框架
 ├── .claw/                # 技能定义 + 权限规则 + 追踪导出

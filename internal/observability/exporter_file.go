@@ -7,8 +7,25 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 )
+
+// sanitizeFilename 移除或替换文件名中不允许的字符（Windows: : * ? " < > |）。
+func sanitizeFilename(s string) string {
+	replacer := strings.NewReplacer(
+		":", "_",
+		"*", "_",
+		"?", "_",
+		"\"", "_",
+		"<", "_",
+		">", "_",
+		"|", "_",
+		"/", "_",
+		"\\", "_",
+	)
+	return replacer.Replace(s)
+}
 
 // FileExporter 将 Span 树序列化为 JSON 文件，保存到本地工作区。
 // 这是最原始的导出方式，保留用于离线分析和调试。
@@ -33,7 +50,8 @@ func (f *FileExporter) Export(_ context.Context, rootSpan *Span) error {
 	}
 
 	// 纳秒级时间戳避免同一秒内碰撞
-	filename := filepath.Join(traceDir, fmt.Sprintf("trace_%s_%d.json", f.sessionID, time.Now().UnixNano()))
+	safeID := sanitizeFilename(f.sessionID)
+	filename := filepath.Join(traceDir, fmt.Sprintf("trace_%s_%d.json", safeID, time.Now().UnixNano()))
 	tmpPath := filename + ".tmp"
 
 	data, err := json.MarshalIndent(rootSpan, "", "  ")
