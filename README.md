@@ -51,8 +51,6 @@ export OPENAI_MODEL="deepseek-chat"
 ./claw run "分析当前目录的代码结构"
 ```
 
-📐 **[查看精美架构图](https://llhuanhuan.github.io/go-tiny-claw/architecture.html)** — Stripe/Linear 风格的 4 层架构可视化
-
 <details>
 <summary><strong>CLI 子命令</strong></summary>
 
@@ -165,6 +163,99 @@ docker run -e OPENAI_BASE_URL=https://api.deepseek.com/ -e OPENAI_API_KEY=sk-...
 </details>
 
 <details>
+<summary><strong>iLink Bot 创建指南（个人微信）</strong></summary>
+
+### 什么是 iLink Bot？
+
+iLink 是微信官方推出的个人微信机器人平台，允许开发者通过 API 接收和发送微信消息。
+
+### 创建步骤
+
+#### 1. 访问 iLink 平台
+
+- **官方地址**：https://ilinkai.weixin.qq.com
+- **备用地址**：https://ilink.weixin.qq.com
+- ⚠️ **如果无法访问**：
+  - 使用代理访问（推荐）
+  - 或在微信客户端内打开链接
+  - 或使用微信开发者工具内置浏览器
+
+#### 2. 登录并创建 Bot
+
+1. 使用微信扫码登录平台
+2. 进入控制台（Dashboard）
+3. 点击「创建机器人」或「Create Bot」
+4. 填写信息：
+   - **机器人名称**：给你的 Bot 起个名字
+   - **机器人描述**：可选，描述 Bot 用途
+   - **类型**：选择「个人微信」
+
+#### 3. 扫码授权
+
+1. 创建成功后，平台会显示一个二维码
+2. 用**个人微信小号**扫描该二维码
+3. 确认授权登录
+4. ⚠️ **重要**：务必使用小号，避免主号被封风险
+
+#### 4. 获取 API Token
+
+1. 授权成功后，进入 Bot 详情页
+2. 找到「API Token」或「API Key」字段
+3. 复制 Token，格式类似：
+   ```
+   xxxxxxxx@im.bot:xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+   ```
+4. ⚠️ **妥善保管 Token，不要泄露**
+
+#### 5. 配置到 go-tiny-claw
+
+编辑 `claw.yaml` 文件：
+
+```yaml
+ilink:
+  token: "你获取的 Bot Token"
+  base_url: "https://ilinkai.weixin.qq.com"
+```
+
+#### 6. 启动服务
+
+```bash
+# 方式一：单独启动 iLink
+./claw ilink
+
+# 方式二：同时启动飞书和 iLink
+./claw serve --feishu --ilink
+```
+
+### 验证是否成功
+
+启动后，向你的微信小号发送消息，观察：
+1. 终端是否显示收到消息
+2. 是否自动回复
+
+### 常见问题
+
+#### Q: 访问 ilinkai.weixin.qq.com 显示 405 错误？
+A: 这是正常的，说明服务器存在。使用浏览器访问时应该能看到登录页面。
+
+#### Q: Token 无效或过期？
+A: 重新登录平台，在 Bot 详情页获取新的 Token。
+
+#### Q: 收不到消息？
+A: 检查：
+1. Token 是否正确配置
+2. 微信小号是否在线
+3. 网络是否通畅
+
+### 安全提醒
+
+- ⚠️ **封号风险**：使用非官方微信机器人可能导致封号
+- ⚠️ **使用小号**：强烈建议使用微信小号，不要使用主号
+- ⚠️ **遵守规则**：遵守微信使用条款，不要发送垃圾消息
+
+</details>
+
+<details>
 <summary><strong>支持的模型</strong></summary>
 
 通过环境变量切换 Provider（代码只判断 `ANTHROPIC_BASE_URL` / `OPENAI_BASE_URL` 两条路径）：
@@ -184,7 +275,7 @@ docker run -e OPENAI_BASE_URL=https://api.deepseek.com/ -e OPENAI_API_KEY=sk-...
 
 ## 架构
 
-> 📊 [查看精美交互式架构图](docs/architecture.html)（支持悬停高亮 + 动态流光效果）
+> 📊 [查看精美架构图](https://llhuanhuan.github.io/go-tiny-claw/architecture.html)
 
 ```
 ┌───────────────────────────────────────────────────────────────────────────────────┐
@@ -193,7 +284,7 @@ docker run -e OPENAI_BASE_URL=https://api.deepseek.com/ -e OPENAI_API_KEY=sk-...
 │    CLI (cobra)            飞书 Bot          个人微信 Bot        企业微信 Bot         │
 │    run · repl ·           WebSocket         iLink HTTP          Webhook             │
 │    serve · feishu         长连接 · 审批卡片  长轮询 · DM         回调 · 审批           │
-│    ilink · session        流式卡片编辑      流式回复            Markdown 推送         │
+│    ilink · session        流式卡片编辑      流式回复       (⚠️ 未实测) Markdown     │
 │                                                                                   │
 │                统一 Reporter 接口：Terminal · Feishu · WeChat · ILink               │
 │                serve 多渠道并发 · Bootstrap 引擎初始化栈 · 管道模式                  │
