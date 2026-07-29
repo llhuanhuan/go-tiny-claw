@@ -174,6 +174,8 @@ docker run -e OPENAI_BASE_URL=https://api.deepseek.com/ -e OPENAI_API_KEY=sk-...
 
 ## 架构
 
+> 📊 [查看精美交互式架构图](docs/architecture.html)（支持悬停高亮 + 动态流光效果）
+
 ```
 ┌───────────────────────────────────────────────────────────────────────────────────┐
 │                        入口交互层  Entry & UI Layer                                 │

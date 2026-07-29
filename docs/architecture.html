@@ -1,0 +1,585 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>go-tiny-claw 架构图</title>
+<style>
+  /* ===== Reset & Base ===== */
+  *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    background: #0f172a;
+    font-family: 'Inter', 'SF Pro Display', -apple-system, 'Segoe UI', system-ui, sans-serif;
+    display: flex;
+    justify-content: center;
+    padding: 60px 24px 80px;
+    min-height: 100vh;
+    color: #cbd5e1;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+
+  .container {
+    width: 960px;
+    position: relative;
+  }
+
+  /* ===== Ambient background glow ===== */
+  .container::before {
+    content: '';
+    position: fixed;
+    top: -200px;
+    left: 50%;
+    transform: translateX(-50%);
+    width: 800px;
+    height: 600px;
+    background: radial-gradient(ellipse, rgba(139,92,246,0.06) 0%, rgba(14,165,233,0.04) 40%, transparent 70%);
+    pointer-events: none;
+    z-index: 0;
+  }
+
+  /* ===== Header ===== */
+  .header {
+    text-align: center;
+    margin-bottom: 56px;
+    position: relative;
+    z-index: 1;
+  }
+
+  .logo-row {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 16px;
+    margin-bottom: 12px;
+  }
+
+  .lobster {
+    font-size: 48px;
+    line-height: 1;
+    animation: lobsterPulse 3s ease-in-out infinite;
+    filter: drop-shadow(0 0 12px rgba(239,68,68,0.3));
+  }
+
+  @keyframes lobsterPulse {
+    0%, 100% { transform: scale(1) rotate(0deg); }
+    25% { transform: scale(1.06) rotate(-3deg); }
+    50% { transform: scale(1) rotate(0deg); }
+    75% { transform: scale(1.03) rotate(2deg); }
+  }
+
+  h1 {
+    color: #f1f5f9;
+    font-size: 36px;
+    font-weight: 800;
+    letter-spacing: -1.2px;
+    background: linear-gradient(135deg, #f1f5f9 0%, #94a3b8 100%);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+  }
+
+  .subtitle {
+    color: #64748b;
+    font-size: 15px;
+    text-align: center;
+    letter-spacing: 0.3px;
+    line-height: 1.6;
+    font-weight: 400;
+  }
+
+  .subtitle .dot {
+    display: inline-block;
+    width: 4px;
+    height: 4px;
+    border-radius: 50%;
+    background: #475569;
+    vertical-align: middle;
+    margin: 0 10px;
+  }
+
+  /* ===== Layer Card ===== */
+  .layer {
+    border-radius: 16px;
+    padding: 32px 36px 28px;
+    margin-bottom: 0;
+    position: relative;
+    z-index: 1;
+    transition: transform 0.3s cubic-bezier(0.22, 1, 0.36, 1), box-shadow 0.3s ease;
+  }
+
+  .layer:hover {
+    transform: translateY(-2px);
+  }
+
+  /* Layer shadows & glow on hover */
+  .layer-1 {
+    background: linear-gradient(145deg, rgba(14,165,233,0.08) 0%, rgba(2,132,199,0.03) 100%);
+    border: 1px solid rgba(14,165,233,0.15);
+    box-shadow: 0 4px 24px rgba(14,165,233,0.06), 0 1px 3px rgba(0,0,0,0.3), inset 0 1px 0 rgba(14,165,233,0.05);
+  }
+  .layer-1:hover {
+    box-shadow: 0 8px 40px rgba(14,165,233,0.12), 0 2px 6px rgba(0,0,0,0.4), inset 0 1px 0 rgba(14,165,233,0.08);
+    border-color: rgba(14,165,233,0.25);
+  }
+
+  .layer-2 {
+    background: linear-gradient(145deg, rgba(16,185,129,0.08) 0%, rgba(5,150,105,0.03) 100%);
+    border: 1px solid rgba(16,185,129,0.15);
+    box-shadow: 0 4px 24px rgba(16,185,129,0.06), 0 1px 3px rgba(0,0,0,0.3), inset 0 1px 0 rgba(16,185,129,0.05);
+  }
+  .layer-2:hover {
+    box-shadow: 0 8px 40px rgba(16,185,129,0.12), 0 2px 6px rgba(0,0,0,0.4), inset 0 1px 0 rgba(16,185,129,0.08);
+    border-color: rgba(16,185,129,0.25);
+  }
+
+  .layer-3 {
+    background: linear-gradient(145deg, rgba(245,158,11,0.08) 0%, rgba(217,119,6,0.03) 100%);
+    border: 1px solid rgba(245,158,11,0.15);
+    box-shadow: 0 4px 24px rgba(245,158,11,0.06), 0 1px 3px rgba(0,0,0,0.3), inset 0 1px 0 rgba(245,158,11,0.05);
+  }
+  .layer-3:hover {
+    box-shadow: 0 8px 40px rgba(245,158,11,0.12), 0 2px 6px rgba(0,0,0,0.4), inset 0 1px 0 rgba(245,158,11,0.08);
+    border-color: rgba(245,158,11,0.25);
+  }
+
+  .layer-4 {
+    background: linear-gradient(145deg, rgba(139,92,246,0.08) 0%, rgba(124,58,237,0.03) 100%);
+    border: 1px solid rgba(139,92,246,0.15);
+    box-shadow: 0 4px 24px rgba(139,92,246,0.06), 0 1px 3px rgba(0,0,0,0.3), inset 0 1px 0 rgba(139,92,246,0.05);
+  }
+  .layer-4:hover {
+    box-shadow: 0 8px 40px rgba(139,92,246,0.12), 0 2px 6px rgba(0,0,0,0.4), inset 0 1px 0 rgba(139,92,246,0.08);
+    border-color: rgba(139,92,246,0.25);
+  }
+
+  /* ===== Layer Header ===== */
+  .layer-header {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    margin-bottom: 22px;
+  }
+
+  .layer-num {
+    width: 36px;
+    height: 36px;
+    border-radius: 10px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-weight: 800;
+    font-size: 15px;
+    flex-shrink: 0;
+    letter-spacing: -0.5px;
+  }
+
+  .layer-title {
+    font-size: 20px;
+    font-weight: 700;
+    letter-spacing: -0.4px;
+  }
+
+  .layer-en {
+    font-size: 12px;
+    font-weight: 500;
+    opacity: 0.45;
+    margin-left: 10px;
+    letter-spacing: 0.5px;
+    text-transform: uppercase;
+  }
+
+  /* Layer 1 specifics */
+  .layer-1 .layer-num {
+    background: linear-gradient(135deg, #0ea5e9, #0284c7);
+    color: #fff;
+    box-shadow: 0 2px 8px rgba(14,165,233,0.3);
+  }
+  .layer-1 .layer-title { color: #7dd3fc; }
+  .layer-1 .comp-title { color: #38bdf8; }
+
+  /* Layer 2 specifics */
+  .layer-2 .layer-num {
+    background: linear-gradient(135deg, #10b981, #059669);
+    color: #fff;
+    box-shadow: 0 2px 8px rgba(16,185,129,0.3);
+  }
+  .layer-2 .layer-title { color: #6ee7b7; }
+  .layer-2 .comp-title { color: #34d399; }
+
+  /* Layer 3 specifics */
+  .layer-3 .layer-num {
+    background: linear-gradient(135deg, #f59e0b, #d97706);
+    color: #fff;
+    box-shadow: 0 2px 8px rgba(245,158,11,0.3);
+  }
+  .layer-3 .layer-title { color: #fcd34d; }
+  .layer-3 .comp-title { color: #fbbf24; }
+
+  /* Layer 4 specifics */
+  .layer-4 .layer-num {
+    background: linear-gradient(135deg, #8b5cf6, #7c3aed);
+    color: #fff;
+    box-shadow: 0 2px 8px rgba(139,92,246,0.3);
+  }
+  .layer-4 .layer-title { color: #c4b5fd; }
+  .layer-4 .comp-title { color: #a78bfa; }
+
+  /* ===== Component Grid ===== */
+  .layer-body {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 16px;
+  }
+
+  .component {
+    background: rgba(0,0,0,0.25);
+    border: 1px solid rgba(255,255,255,0.04);
+    border-radius: 12px;
+    padding: 20px 20px 18px;
+    transition: background 0.25s ease, border-color 0.25s ease, transform 0.25s cubic-bezier(0.22, 1, 0.36, 1);
+    position: relative;
+    overflow: hidden;
+  }
+
+  .component::before {
+    content: '';
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    height: 1px;
+    background: linear-gradient(90deg, transparent, rgba(255,255,255,0.06), transparent);
+  }
+
+  .component:hover {
+    background: rgba(255,255,255,0.04);
+    border-color: rgba(255,255,255,0.08);
+    transform: translateY(-1px);
+  }
+
+  /* Per-layer component hover glow */
+  .layer-1 .component:hover { border-color: rgba(14,165,233,0.15); box-shadow: 0 4px 16px rgba(14,165,233,0.06); }
+  .layer-2 .component:hover { border-color: rgba(16,185,129,0.15); box-shadow: 0 4px 16px rgba(16,185,129,0.06); }
+  .layer-3 .component:hover { border-color: rgba(245,158,11,0.15); box-shadow: 0 4px 16px rgba(245,158,11,0.06); }
+  .layer-4 .component:hover { border-color: rgba(139,92,246,0.15); box-shadow: 0 4px 16px rgba(139,92,246,0.06); }
+
+  .comp-title {
+    font-size: 14px;
+    font-weight: 700;
+    margin-bottom: 12px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    letter-spacing: -0.2px;
+  }
+
+  .comp-items {
+    font-size: 12.5px;
+    line-height: 2;
+    color: #94a3b8;
+  }
+
+  .comp-items span {
+    display: inline-block;
+    background: rgba(255,255,255,0.05);
+    border: 1px solid rgba(255,255,255,0.04);
+    padding: 2px 10px;
+    border-radius: 6px;
+    margin: 2px 3px;
+    white-space: nowrap;
+    font-size: 12px;
+    font-weight: 500;
+    transition: background 0.2s ease, border-color 0.2s ease;
+    letter-spacing: 0.1px;
+  }
+
+  .component:hover .comp-items span {
+    background: rgba(255,255,255,0.07);
+    border-color: rgba(255,255,255,0.06);
+  }
+
+  /* ===== Layer Footer ===== */
+  .layer-footer {
+    margin-top: 20px;
+    padding-top: 16px;
+    border-top: 1px solid rgba(255,255,255,0.06);
+    font-size: 11.5px;
+    color: #64748b;
+    text-align: center;
+    letter-spacing: 0.3px;
+    line-height: 1.7;
+    font-weight: 400;
+  }
+
+  /* ===== Animated Arrow Connector ===== */
+  .arrow {
+    display: flex;
+    justify-content: center;
+    padding: 10px 0;
+    position: relative;
+    z-index: 1;
+  }
+
+  .arrow-line {
+    width: 2px;
+    height: 40px;
+    position: relative;
+    overflow: visible;
+  }
+
+  .arrow-line::before {
+    content: '';
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 2px;
+    height: 100%;
+    background: linear-gradient(180deg, rgba(100,116,139,0.3), rgba(100,116,139,0.1));
+    border-radius: 1px;
+  }
+
+  /* Flowing dot */
+  .arrow-line .dot {
+    position: absolute;
+    width: 4px;
+    height: 4px;
+    border-radius: 50%;
+    left: -1px;
+    animation: flowDown 2s ease-in-out infinite;
+  }
+
+  .arrow-line .dot:nth-child(1) { animation-delay: 0s; }
+  .arrow-line .dot:nth-child(2) { animation-delay: 0.7s; }
+  .arrow-line .dot:nth-child(3) { animation-delay: 1.4s; }
+
+  .arrow-1 .dot { background: #0ea5e9; box-shadow: 0 0 8px rgba(14,165,233,0.5); }
+  .arrow-2 .dot { background: #10b981; box-shadow: 0 0 8px rgba(16,185,129,0.5); }
+  .arrow-3 .dot { background: #f59e0b; box-shadow: 0 0 8px rgba(245,158,11,0.5); }
+
+  @keyframes flowDown {
+    0% { top: -4px; opacity: 0; }
+    15% { opacity: 1; }
+    85% { opacity: 1; }
+    100% { top: calc(100% + 4px); opacity: 0; }
+  }
+
+  /* Arrow chevron at bottom */
+  .arrow-chevron {
+    position: absolute;
+    bottom: -6px;
+    left: 50%;
+    transform: translateX(-50%);
+    width: 10px;
+    height: 10px;
+  }
+
+  .arrow-chevron svg {
+    display: block;
+  }
+
+  /* ===== Responsive fine-tuning ===== */
+  @media (max-width: 1000px) {
+    .container { width: 100%; }
+    .layer-body { grid-template-columns: 1fr; }
+  }
+</style>
+</head>
+<body>
+<div class="container">
+
+  <!-- ===== Header ===== -->
+  <div class="header">
+    <div class="logo-row">
+      <span class="lobster">&#x1F99E;</span>
+      <h1>go-tiny-claw</h1>
+    </div>
+    <p class="subtitle">
+      4-Layer Architecture
+      <span class="dot"></span>
+      ReAct Loop
+      <span class="dot"></span>
+      File System Tools
+      <span class="dot"></span>
+      Shell Commands
+    </p>
+  </div>
+
+  <!-- ===== Layer 1: Entry & UI ===== -->
+  <div class="layer layer-1">
+    <div class="layer-header">
+      <div class="layer-num">1</div>
+      <div>
+        <span class="layer-title">入口交互层</span>
+        <span class="layer-en">Entry &amp; UI Layer</span>
+      </div>
+    </div>
+    <div class="layer-body">
+      <div class="component">
+        <div class="comp-title">⌨️ CLI (cobra)</div>
+        <div class="comp-items">
+          <span>run</span><span>repl</span><span>server</span><span>feishu</span>
+          <span>session</span><span>config</span><span>version</span>
+        </div>
+      </div>
+      <div class="component">
+        <div class="comp-title">🪷 飞书 Bot</div>
+        <div class="comp-items">
+          <span>WebSocket 长连接</span><span>审批卡片</span>
+          <span>流式卡片编辑</span><span>/stop /reset</span>
+        </div>
+      </div>
+      <div class="component">
+        <div class="comp-title">💬 企业微信 Bot</div>
+        <div class="comp-items">
+          <span>Webhook</span><span>回调</span>
+          <span>审批流</span><span>Markdown 推送</span>
+        </div>
+      </div>
+    </div>
+    <div class="layer-footer">统一 Reporter 接口：Terminal · Feishu · WeChat ｜ Bootstrap 引擎初始化栈 ｜ 管道模式</div>
+  </div>
+
+  <!-- Arrow 1-2 -->
+  <div class="arrow">
+    <div class="arrow-line arrow-1">
+      <div class="dot"></div>
+      <div class="dot"></div>
+      <div class="dot"></div>
+    </div>
+  </div>
+
+  <!-- ===== Layer 2: Core Engine ===== -->
+  <div class="layer layer-2">
+    <div class="layer-header">
+      <div class="layer-num">2</div>
+      <div>
+        <span class="layer-title">核心引擎层</span>
+        <span class="layer-en">Core Engine Layer</span>
+      </div>
+    </div>
+    <div class="layer-body">
+      <div class="component">
+        <div class="comp-title">🔄 ReAct 循环</div>
+        <div class="comp-items">
+          <span>Thinking + Action</span><span>并行/串行执行</span>
+          <span>死循环检测</span><span>流式输出</span>
+        </div>
+      </div>
+      <div class="component">
+        <div class="comp-title">🔌 Provider 适配</div>
+        <div class="comp-items">
+          <span>Claude</span><span>OpenAI</span>
+          <span>重试装饰器</span><span>限流器</span>
+          <span>StreamAccumulator</span>
+        </div>
+      </div>
+      <div class="component">
+        <div class="comp-title">📋 Schema 定义</div>
+        <div class="comp-items">
+          <span>Message</span><span>ToolCall</span>
+          <span>ToolResult</span><span>TokenUsage</span>
+        </div>
+      </div>
+    </div>
+    <div class="layer-footer">Session 管理：JSONL 持久化 · 多用户隔离 · 断点续跑 ｜ Subagent 调度：异步 spawn · context 取消传播</div>
+  </div>
+
+  <!-- Arrow 2-3 -->
+  <div class="arrow">
+    <div class="arrow-line arrow-2">
+      <div class="dot"></div>
+      <div class="dot"></div>
+      <div class="dot"></div>
+    </div>
+  </div>
+
+  <!-- ===== Layer 3: Context Engineering ===== -->
+  <div class="layer layer-3">
+    <div class="layer-header">
+      <div class="layer-num">3</div>
+      <div>
+        <span class="layer-title">上下文工程层</span>
+        <span class="layer-en">Context Engineering Layer</span>
+      </div>
+    </div>
+    <div class="layer-body">
+      <div class="component">
+        <div class="comp-title">🧩 PromptComposer</div>
+        <div class="comp-items">
+          <span>三段式 System Prompt</span>
+          <span>技能元数据索引</span>
+          <span>AGENTS.md 加载</span>
+        </div>
+      </div>
+      <div class="component">
+        <div class="comp-title">🗜️ Compactor</div>
+        <div class="comp-items">
+          <span>5 级自适应压缩</span>
+          <span>Token 利用率驱动</span>
+          <span>滑动窗口截断</span>
+        </div>
+      </div>
+      <div class="component">
+        <div class="comp-title">📊 可观测性</div>
+        <div class="comp-items">
+          <span>CostTracker</span><span>Span 树追踪</span>
+          <span>File Exporter</span><span>Log Exporter</span>
+          <span>OTel Exporter</span>
+        </div>
+      </div>
+    </div>
+    <div class="layer-footer">SkillLoader 渐进式技能暴露 ｜ RecoveryManager 错误恢复注入 ｜ 压缩级别自动切换</div>
+  </div>
+
+  <!-- Arrow 3-4 -->
+  <div class="arrow">
+    <div class="arrow-line arrow-3">
+      <div class="dot"></div>
+      <div class="dot"></div>
+      <div class="dot"></div>
+    </div>
+  </div>
+
+  <!-- ===== Layer 4: Tool Execution ===== -->
+  <div class="layer layer-4">
+    <div class="layer-header">
+      <div class="layer-num">4</div>
+      <div>
+        <span class="layer-title">工具与执行层</span>
+        <span class="layer-en">Tool Execution Layer</span>
+      </div>
+    </div>
+    <div class="layer-body">
+      <div class="component">
+        <div class="comp-title">🛠️ 11 个内置工具</div>
+        <div class="comp-items">
+          <span>read_file</span><span>write_file</span><span>edit_file</span>
+          <span>bash</span><span>search_files</span><span>fetch_url</span>
+          <span>read_skill</span><span>spawn_subagent</span><span>check_subagent</span>
+          <span>task_output</span><span>task_stop</span>
+        </div>
+      </div>
+      <div class="component">
+        <div class="comp-title">🔒 权限引擎</div>
+        <div class="comp-items">
+          <span>COW 无锁读取</span><span>正则热重载</span>
+          <span>14 条规则</span><span>5 deny</span><span>5 ask</span><span>4 allow</span>
+          <span>审批流集成</span>
+        </div>
+      </div>
+      <div class="component">
+        <div class="comp-title">🤖 子代理 &amp; 后台进程</div>
+        <div class="comp-items">
+          <span>SubagentManager</span><span>只读隔离</span>
+          <span>context 传播</span><span>TaskManager</span>
+          <span>PCB 模型</span><span>RingBuffer</span>
+        </div>
+      </div>
+    </div>
+    <div class="layer-footer">只读并行（信号量=5）· 写入串行 · Workspace RWMutex ｜ 依赖方向严格自上而下，无循环引用</div>
+  </div>
+
+</div>
+</body>
+</html>
