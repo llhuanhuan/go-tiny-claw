@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -8,11 +9,11 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
-	"context"
 
 	ctxpkg "github.com/lhuan/go-tiny-claw/internal/context"
 	"github.com/lhuan/go-tiny-claw/internal/engine"
 	"github.com/lhuan/go-tiny-claw/internal/feishu"
+	"github.com/lhuan/go-tiny-claw/internal/ilink"
 	"github.com/lhuan/go-tiny-claw/internal/provider"
 	"github.com/lhuan/go-tiny-claw/internal/wechat"
 )
@@ -145,4 +146,32 @@ func runWechat(eng *engine.AgentEngine, cfg *AppConfig) {
 	if err := http.ListenAndServe(port, mux); err != nil {
 		log.Fatalf("服务器启动失败: %v", err)
 	}
+}
+
+// runILink 通过 HTTP 长轮询接入 iLink Bot（个人微信）。
+// 使用工厂模式：每个用户会话动态创建独立的引擎实例，实现 per-session 计费隔离。
+func runILink(eng *engine.AgentEngine, billingSession *ctxpkg.Session, cfg *AppConfig) {
+	workDir, _ := os.Getwd()
+
+	// 工厂闭包：捕获共享依赖，为每个 Session 创建独立引擎
+	factory := ilink.AgentEngineFactory(func(sess *engine.Session) *engine.AgentEngine {
+		e := engine.NewAgentEngine(eng.Provider(), eng.Registry(), workDir, true, cfg.Model.PlanMode)
+		e.SetMaxContextWindow(cfg.Model.MaxContextWindow)
+		// 为每个会话创建独立的计费 Session，实现 per-session 计费隔离
+		billing := ctxpkg.NewSession("ilink:" + sess.ID)
+		e.SetBillingSession(billing)
+		return e
+	})
+
+	bot := ilink.NewILinkBot(factory, workDir, cfg.ILink.Token, cfg.ILink.BaseURL)
+
+	// 监听 Ctrl+C 优雅退出
+	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
+	defer cancel()
+
+	log.Println("🚀 go-tiny-claw iLink Bot（个人微信）模式启动中...")
+	if err := bot.Start(ctx); err != nil {
+		log.Fatalf("iLink Bot 启动失败: %v", err)
+	}
+	log.Println("[Bootstrap] iLink Bot 长轮询已停止，程序退出。")
 }

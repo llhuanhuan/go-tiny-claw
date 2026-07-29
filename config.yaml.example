@@ -4,6 +4,12 @@
 #
 # 优先级：环境变量 > config.yaml > 默认值
 # 环境变量可覆盖此文件中的任何字段，适合 CI/CD 或 Docker 场景。
+#
+# 启动命令：
+#   claw serve --feishu --ilink  # 同时启动飞书和个人微信
+#   claw feishu                  # 仅启动飞书
+#   claw ilink                   # 仅启动个人微信
+#   claw server                  # 启动 HTTP 服务器（企业微信 Webhook，⚠️ 尚未实测）
 
 server:
   port: 48080          # HTTP 服务端口（微信模式）
@@ -26,11 +32,17 @@ feishu:
   app_id: ""
   app_secret: ""
 
-# 企业微信配置（设置 webhook_url 后自动进入微信模式）
+# 企业微信配置（⚠️ 尚未实测，设置 webhook_url 后自动进入微信模式）
 wechat:
   webhook_url: ""      # 群机器人 Webhook 地址
   token: ""            # 可选，回调签名校验 Token
   encoding_aes_key: "" # 可选，消息加解密密钥
+
+# iLink Bot 配置（个人微信机器人，设置 token 后自动进入 iLink 模式）
+# Token 通过 iLink Bot QR 码登录获取（格式: xxx@im.bot:xxx）
+ilink:
+  token: ""            # Bearer Token，格式: xxx@im.bot:xxx
+  base_url: ""         # API 地址，留空使用默认值 https://ilinkai.weixin.qq.com
 
 # 任务完成通知配置（桌面 + 手机端）
 # 任一通道启用后，任务完成时自动发送通知

@@ -14,6 +14,7 @@ type AppConfig struct {
 	Proxy  ProxyConfig  `yaml:"proxy"`
 	Feishu FeishuConfig `yaml:"feishu"`
 	Wechat WechatConfig `yaml:"wechat"`
+	ILink  ILinkConfig  `yaml:"ilink"`
 	Model  ModelConfig  `yaml:"model"`
 }
 
@@ -43,12 +44,18 @@ type WechatConfig struct {
 	EncodingAESKey string `yaml:"encoding_aes_key"`
 }
 
+// ILinkConfig 定义 iLink Bot（个人微信机器人）的连接配置。
+type ILinkConfig struct {
+	Token   string `yaml:"token"`    // Bearer Token（格式: xxx@im.bot:xxx）
+	BaseURL string `yaml:"base_url"` // API 基础地址，留空使用默认值
+}
+
 // ModelConfig 定义模型相关的配置，用于自适应压缩决策。
 type ModelConfig struct {
 	Name               string `yaml:"name"`                // 模型名称，用于计费查找 (如 "glm-4.5-air")
-	MaxContextWindow   int    `yaml:"max_context_window"`   // 模型上下文窗口 Token 数，默认 200000
-	PlanMode           bool   `yaml:"plan_mode"`            // 计划模式开关：开启后 Agent 使用 PLAN.md/TODO.md 进行长程任务管理
-	CompactorWatermark int    `yaml:"compactor_watermark"`  // 压缩器水位线（字符数），0 = 自动计算
+	MaxContextWindow   int    `yaml:"max_context_window"`  // 模型上下文窗口 Token 数，默认 200000
+	PlanMode           bool   `yaml:"plan_mode"`           // 计划模式开关：开启后 Agent 使用 PLAN.md/TODO.md 进行长程任务管理
+	CompactorWatermark int    `yaml:"compactor_watermark"` // 压缩器水位线（字符数），0 = 自动计算
 }
 
 // DefaultConfig 返回一套开箱即用的默认配置。
@@ -59,9 +66,9 @@ func DefaultConfig() *AppConfig {
 			Mode: "debug",
 		},
 		Model: ModelConfig{
-			Name:               "",    // 必须由用户配置
+			Name:               "",     // 必须由用户配置
 			MaxContextWindow:   200000, // 默认 200k Token（适配 Claude Sonnet）
-			CompactorWatermark: 0,     // 0 = 自动计算
+			CompactorWatermark: 0,      // 0 = 自动计算
 		},
 	}
 }
@@ -76,6 +83,9 @@ func (c *AppConfig) Validate() error {
 	}
 	if c.Wechat.WebhookURL != "" && c.Wechat.Token == "" {
 		log.Printf("[Config] ⚠️ 企业微信 webhook_url 已配置但 token 为空，签名校验将被跳过")
+	}
+	if c.ILink.Token != "" {
+		log.Printf("[Config] ✅ iLink Bot Token 已配置")
 	}
 	if c.Server.Port <= 0 || c.Server.Port > 65535 {
 		return fmt.Errorf("server.port 必须在 1-65535 之间，当前值: %d", c.Server.Port)
@@ -143,6 +153,14 @@ func (c *AppConfig) applyEnvOverrides() {
 	}
 	if v := os.Getenv("WECHAT_ENCODING_AES_KEY"); v != "" {
 		c.Wechat.EncodingAESKey = v
+	}
+
+	// iLink Bot（个人微信）
+	if v := os.Getenv("ILINK_TOKEN"); v != "" {
+		c.ILink.Token = v
+	}
+	if v := os.Getenv("ILINK_BASE_URL"); v != "" {
+		c.ILink.BaseURL = v
 	}
 
 	// 服务器端口

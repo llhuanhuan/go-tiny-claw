@@ -57,7 +57,9 @@ func newRootCmd() *cobra.Command {
   claw run "你的任务描述"        # 单次任务
   claw run -f task.txt          # 从文件读取任务
   claw                         # 进入 REPL 交互模式
+  claw serve --feishu --ilink  # 同时启动飞书和个人微信
   claw feishu                  # 启动飞书机器人
+  claw ilink                   # 启动 iLink Bot（个人微信）
   claw server                  # 启动 HTTP 服务器`,
 		// 无子命令时进入 REPL（交互模式）或兼容旧格式
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -116,7 +118,9 @@ func newRootCmd() *cobra.Command {
 	rootCmd.AddCommand(
 		newRunCmd(),
 		newReplCmd(),
+		newServeCmd(),
 		newFeishuCmd(),
+		newILinkCmd(),
 		newServerCmd(),
 		newSessionCmd(),
 		newConfigCmd(),
