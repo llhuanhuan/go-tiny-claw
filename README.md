@@ -192,11 +192,11 @@ docker run -e OPENAI_BASE_URL=https://api.deepseek.com/ -e OPENAI_API_KEY=sk-...
 │                                                                                   │
 │    CLI (cobra)            飞书 Bot          个人微信 Bot        企业微信 Bot         │
 │    run · repl ·           WebSocket         iLink HTTP          Webhook             │
-│    server · feishu        长连接 · 审批卡片  长轮询 · DM         回调 · 审批           │
-│    serve · ilink                                            (⚠️ 尚未实测)          │
+│    serve · feishu         长连接 · 审批卡片  长轮询 · DM         回调 · 审批           │
+│    ilink · session        流式卡片编辑      流式回复            Markdown 推送         │
 │                                                                                   │
-│                统一 Reporter 接口：Terminal · Feishu · WeChat                       │
-│                Bootstrap 引擎初始化栈 · 管道模式 · ANSI 终端输出                      │
+│                统一 Reporter 接口：Terminal · Feishu · WeChat · ILink               │
+│                serve 多渠道并发 · Bootstrap 引擎初始化栈 · 管道模式                  │
 ├───────────────────────────────────────────────────────────────────────────────────┤
 │                        核心引擎层  Core Engine Layer                                │
 │                                                                                   │
