@@ -51,6 +51,8 @@ export OPENAI_MODEL="deepseek-chat"
 ./claw run "分析当前目录的代码结构"
 ```
 
+📐 **[查看精美架构图](https://llhuanhuan.github.io/go-tiny-claw/architecture.html)** — Stripe/Linear 风格的 4 层架构可视化
+
 <details>
 <summary><strong>CLI 子命令</strong></summary>
 
