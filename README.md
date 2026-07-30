@@ -167,57 +167,55 @@ docker run -e OPENAI_BASE_URL=https://api.deepseek.com/ -e OPENAI_API_KEY=sk-...
 
 ### 什么是 iLink Bot？
 
-iLink 是微信官方推出的个人微信机器人平台，允许开发者通过 API 接收和发送微信消息。
+iLink 是微信官方推出的个人微信机器人平台，底层使用 **ilink HTTP 网关**（`getUpdates` 长轮询 + `sendMessage` 下发），允许开发者通过 API 接收和发送微信消息。
+
+> **注意**：这是「个人微信 + iLink」通道，与**企业微信**（`type = "wecom"`）不是同一套协议。
+
+### 前置要求
+
+- 可运行 go-tiny-claw 的环境（无需公网 IP；iLink 由云端提供）
+- 已安装 [cc-connect](https://github.com/chenhg5/cc-connect)（用于扫码获取 Token）
+- 使用**微信（手机端）**扫码完成 iLink 登录
+- ⚠️ **强烈建议使用微信小号**，避免主号被封风险
 
 ### 创建步骤
 
-#### 1. 访问 iLink 平台
+#### 1. 获取 iLink Bot Token
 
-- **官方地址**：https://ilinkai.weixin.qq.com
-- **备用地址**：https://ilink.weixin.qq.com
-- ⚠️ **如果无法访问**：
-  - 使用代理访问（推荐）
-  - 或在微信客户端内打开链接
-  - 或使用微信开发者工具内置浏览器
+iLink Bot Token 需要通过 **cc-connect** 工具扫码获取：
 
-#### 2. 登录并创建 Bot
+```bash
+# 安装 cc-connect（如果还没有）
+# 参考 https://github.com/chenhg5/cc-connect
 
-1. 使用微信扫码登录平台
-2. 进入控制台（Dashboard）
-3. 点击「创建机器人」或「Create Bot」
-4. 填写信息：
-   - **机器人名称**：给你的 Bot 起个名字
-   - **机器人描述**：可选，描述 Bot 用途
-   - **类型**：选择「个人微信」
+# 扫码获取 Token
+cc-connect weixin setup
+```
 
-#### 3. 扫码授权
+终端会显示二维码，用微信小号扫码后自动获取 Token 并写入配置。
 
-1. 创建成功后，平台会显示一个二维码
-2. 用**个人微信小号**扫描该二维码
-3. 确认授权登录
-4. ⚠️ **重要**：务必使用小号，避免主号被封风险
+> **已有 Token？** 直接跳到步骤 2。
 
-#### 4. 获取 API Token
-
-1. 授权成功后，进入 Bot 详情页
-2. 找到「API Token」或「API Key」字段
-3. 复制 Token，格式类似：
-   ```
-   xxxxxxxx@im.bot:xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
-   ```
-4. ⚠️ **妥善保管 Token，不要泄露**
-
-#### 5. 配置到 go-tiny-claw
+#### 2. 配置到 go-tiny-claw
 
 编辑 `claw.yaml` 文件：
 
 ```yaml
 ilink:
-  token: "你获取的 Bot Token"
-  base_url: "https://ilinkai.weixin.qq.com"
+  token: "你获取的 Bot Token"                    # 必填
+  base_url: "https://ilinkai.weixin.qq.com"     # 可选，默认同左
+  # allow_from: "user@im.wechat"                # 可选，限制使用者 ID
+  # cdn_base_url: "https://novac2c.cdn.weixin.qq.com/c2c"  # 可选，媒体下载
 ```
 
-#### 6. 启动服务
+| 配置项 | 说明 |
+|--------|------|
+| `token` | Bearer Token（必填） |
+| `base_url` | ilink 网关地址（默认 `https://ilinkai.weixin.qq.com`） |
+| `allow_from` | 限制允许使用机器人的微信用户 ID，多个用逗号分隔 |
+| `cdn_base_url` | 微信 CDN 根路径，用于下载图片/文件等媒体 |
+
+#### 3. 启动服务
 
 ```bash
 # 方式一：单独启动 iLink
@@ -227,30 +225,53 @@ ilink:
 ./claw serve --feishu --ilink
 ```
 
-### 验证是否成功
+#### 4. 首次对话关联
 
-启动后，向你的微信小号发送消息，观察：
-1. 终端是否显示收到消息
-2. 是否自动回复
+启动服务后，**首次连接**需要：
+1. 用微信小号**给机器人发一条消息**
+2. 系统会缓存 `context_token`，之后才能正常回复
+3. 向你的微信小号发送消息，观察终端是否显示收到消息并自动回复
+
+### 配置字段说明
+
+| 字段 | 说明 | 默认值 |
+|------|------|--------|
+| `token` | Bearer Token（必填） | — |
+| `base_url` | ilink 网关地址 | `https://ilinkai.weixin.qq.com` |
+| `allow_from` | 限制使用者 ID（`"*"` 或留空表示不限制） | 空 |
+| `cdn_base_url` | CDN 根路径（媒体下载） | — |
 
 ### 常见问题
 
-#### Q: 访问 ilinkai.weixin.qq.com 显示 405 错误？
-A: 这是正常的，说明服务器存在。使用浏览器访问时应该能看到登录页面。
+| 现象 | 建议 |
+|------|------|
+| 扫码无反应 / 超时 | 检查网络、`base_url` 配置；重试 `cc-connect weixin setup` |
+| 写入配置后仍收不到消息 | 确认 Token 正确、微信小号已发消息触发 `context_token`、进程已重启 |
+| Token 无效或过期 | 重新运行 `cc-connect weixin setup` 扫码获取新 Token |
+| errcode `-14` 等 | 会话过期，暂停轮询后重新登录或稍后再试 |
 
-#### Q: Token 无效或过期？
-A: 重新登录平台，在 Bot 详情页获取新的 Token。
+### 群聊支持
 
-#### Q: 收不到消息？
-A: 检查：
-1. Token 是否正确配置
-2. 微信小号是否在线
-3. 网络是否通畅
+个人微信支持群聊。要把机器人绑定到某个群：
+
+1. 启动 go-tiny-claw，并让机器人加入目标群
+2. 让群里已允许的用户在群里发一条消息
+3. 查看日志：消息到达时会打印带 `@chatroom` 后缀的 `chat_id`
+4. 在 `claw.yaml` 中配置：
+
+```yaml
+ilink:
+  token: "你的 Bot Token"
+  # 留空响应所有聊天，填写具体值只响应该群/个人
+```
+
+**把机器人加进群**：个人微信机器人没有"邀请机器人入群"的 API，需由已绑定的微信号把机器人拉进群。
 
 ### 安全提醒
 
 - ⚠️ **封号风险**：使用非官方微信机器人可能导致封号
 - ⚠️ **使用小号**：强烈建议使用微信小号，不要使用主号
+- ⚠️ **限制使用者**：生产环境务必配置 `allow_from`，避免未授权访问
 - ⚠️ **遵守规则**：遵守微信使用条款，不要发送垃圾消息
 
 </details>
