@@ -9,6 +9,7 @@ import (
 
 	ctxpkg "github.com/lhuan/go-tiny-claw/internal/context"
 	"github.com/lhuan/go-tiny-claw/internal/engine"
+	"github.com/lhuan/go-tiny-claw/internal/memory"
 	"github.com/lhuan/go-tiny-claw/internal/observability"
 	"github.com/lhuan/go-tiny-claw/internal/permissions"
 	"github.com/lhuan/go-tiny-claw/internal/provider"
@@ -114,4 +115,25 @@ func Bootstrap(cfg *AppConfig) (*BootstrapResult, error) {
 		WorkDir:        workDir,
 		CancelFunc:     bootstrapCancel,
 	}, nil
+}
+
+// InitMemoryManager 初始化分层记忆管理器并注入引擎。
+// 应在 Bootstrap 之后、Run 之前调用。
+func InitMemoryManager(eng *engine.AgentEngine, cfg *AppConfig, sessionID string) *memory.Manager {
+	if !cfg.Memory.Enabled {
+		return nil
+	}
+
+	memConfig := memory.MemoryConfig{
+		Enabled:          cfg.Memory.Enabled,
+		SummarizeEveryN:  cfg.Memory.SummarizeEveryN,
+		ExtractEveryN:    cfg.Memory.ExtractEveryN,
+		MaxSummaryTokens: cfg.Memory.MaxSummaryTokens,
+		MaxFacts:         cfg.Memory.MaxFacts,
+	}
+
+	workDir, _ := os.Getwd()
+	mgr := memory.NewManager(workDir, sessionID, eng.Provider(), memConfig)
+	eng.SetMemoryManager(mgr)
+	return mgr
 }

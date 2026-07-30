@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
 	"sync"
 	"testing"
 	"time"
@@ -593,5 +595,98 @@ func TestWorkingMemory_MaxCharsZeroBackwardCompat(t *testing.T) {
 	}
 	if wm[0].Content != "msg 7" {
 		t.Fatalf("期望首条为 'msg 7', 得到 %q", wm[0].Content)
+	}
+}
+
+func TestSanitizeSessionID(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    string
+		expected string
+	}{
+		{"feishu", "feishu:oc_abc123", "feishu_oc_abc123"},
+		{"ilink", "ilink:user@im.wechat", "ilink_user@im.wechat"},
+		{"no_special", "simple_id", "simple_id"},
+		{"multiple_colons", "a:b:c", "a_b_c"},
+		{"all_illegal", `a:b*c?"<>|/\`, "a_b_c_______"},
+		{"empty", "", ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := SanitizeSessionID(tt.input)
+			if result != tt.expected {
+				t.Errorf("SanitizeSessionID(%q) = %q, want %q", tt.input, result, tt.expected)
+			}
+		})
+	}
+}
+
+func TestSession_SaveAndLoadFromDisk(t *testing.T) {
+	tmpDir := t.TempDir()
+	sessionID := "feishu:oc_test_123"
+	session := NewSession(sessionID, tmpDir)
+
+	// 追加几条消息
+	session.Append(userMsg("你好"))
+	session.Append(assistantMsg("你好！有什么可以帮你的？"))
+
+	// 验证文件存在且使用安全文件名
+	safePath := filepath.Join(tmpDir, ".claw", "sessions", "feishu_oc_test_123.jsonl")
+	if _, err := os.Stat(safePath); os.IsNotExist(err) {
+		t.Fatalf("期望安全文件名路径存在: %s", safePath)
+	}
+
+	// 创建新会话，模拟重启
+	session2 := NewSession(sessionID, tmpDir)
+	if err := session2.LoadFromDisk(); err != nil {
+		t.Fatalf("LoadFromDisk 失败: %v", err)
+	}
+
+	// 验证恢复了历史
+	wm := session2.GetWorkingMemory(0, 0)
+	if len(wm) != 2 {
+		t.Fatalf("期望恢复 2 条消息, 得到 %d", len(wm))
+	}
+	if wm[0].Content != "你好" {
+		t.Errorf("期望首条消息为 '你好', 得到 %q", wm[0].Content)
+	}
+}
+
+func TestSession_LoadFromDisk_Migration(t *testing.T) {
+	tmpDir := t.TempDir()
+	sessDir := filepath.Join(tmpDir, ".claw", "sessions")
+	if err := os.MkdirAll(sessDir, 0755); err != nil {
+		t.Fatalf("创建目录失败: %v", err)
+	}
+
+	// 模拟旧的 ADS 文件：直接用含 : 的原始 ID 写入
+	sessionID := "feishu:oc_migrate_test"
+	legacyPath := filepath.Join(sessDir, sessionID+".jsonl")
+	msg := schema.Message{Role: schema.RoleUser, Content: "旧消息"}
+	data, _ := json.Marshal(msg)
+	if err := os.WriteFile(legacyPath, append(data, '\n'), 0644); err != nil {
+		t.Fatalf("写入旧文件失败: %v", err)
+	}
+
+	// 用新会话加载，应自动迁移
+	session := NewSession(sessionID, tmpDir)
+	if err := session.LoadFromDisk(); err != nil {
+		t.Fatalf("LoadFromDisk 失败: %v", err)
+	}
+
+	// 验证恢复了历史
+	wm := session.GetWorkingMemory(0, 0)
+	if len(wm) != 1 {
+		t.Fatalf("期望恢复 1 条消息, 得到 %d", len(wm))
+	}
+	if wm[0].Content != "旧消息" {
+		t.Errorf("期望消息为 '旧消息', 得到 %q", wm[0].Content)
+	}
+
+	// 验证新文件已创建
+	safePath := filepath.Join(sessDir, "feishu_oc_migrate_test.jsonl")
+	if _, err := os.Stat(safePath); os.IsNotExist(err) {
+		t.Error("迁移后应创建安全文件名的新文件")
 	}
 }

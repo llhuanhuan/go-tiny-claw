@@ -16,6 +16,7 @@ type AppConfig struct {
 	Wechat WechatConfig `yaml:"wechat"`
 	ILink  ILinkConfig  `yaml:"ilink"`
 	Model  ModelConfig  `yaml:"model"`
+	Memory MemoryConfig `yaml:"memory"`
 }
 
 // ProxyConfig 定义网络代理配置。
@@ -58,6 +59,15 @@ type ModelConfig struct {
 	CompactorWatermark int    `yaml:"compactor_watermark"` // 压缩器水位线（字符数），0 = 自动计算
 }
 
+// MemoryConfig 定义分层记忆系统的配置。
+type MemoryConfig struct {
+	Enabled          bool `yaml:"enabled"`            // 是否启用记忆系统
+	SummarizeEveryN  int  `yaml:"summarize_every_n"`  // 每 N 轮对话触发摘要
+	ExtractEveryN    int  `yaml:"extract_every_n"`    // 每 N 轮对话触发事实提取
+	MaxSummaryTokens int  `yaml:"max_summary_tokens"` // 摘要最大 token 数
+	MaxFacts         int  `yaml:"max_facts"`          // 长期记忆最大条数
+}
+
 // DefaultConfig 返回一套开箱即用的默认配置。
 func DefaultConfig() *AppConfig {
 	return &AppConfig{
@@ -69,6 +79,13 @@ func DefaultConfig() *AppConfig {
 			Name:               "",     // 必须由用户配置
 			MaxContextWindow:   200000, // 默认 200k Token（适配 Claude Sonnet）
 			CompactorWatermark: 0,      // 0 = 自动计算
+		},
+		Memory: MemoryConfig{
+			Enabled:          true,
+			SummarizeEveryN:  10,
+			ExtractEveryN:    15,
+			MaxSummaryTokens: 2000,
+			MaxFacts:         50,
 		},
 	}
 }

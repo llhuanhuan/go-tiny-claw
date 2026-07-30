@@ -11,6 +11,7 @@ import (
 	"time"
 
 	ctxpkg "github.com/lhuan/go-tiny-claw/internal/context"
+	"github.com/lhuan/go-tiny-claw/internal/memory"
 
 	"github.com/lhuan/go-tiny-claw/internal/observability"
 	"github.com/lhuan/go-tiny-claw/internal/provider"
@@ -47,10 +48,13 @@ type AgentEngine struct {
 	injector  *ReminderInjector       // 提醒注入器
 
 	// 跑分指标：试错成本度量
-	billingSession  *ctxpkg.Session // 指向计费 Session，用于按 Turn 快照 token 消耗
-	totalTurns      int             // 总 Turn 数
-	errorTurns      int             // 触发过 RecoveryManager 的 Turn 数
-	recoveryTokens  int             // 错误 Turn 累计消耗的 token 数
+	billingSession *ctxpkg.Session // 指向计费 Session，用于按 Turn 快照 token 消耗
+	totalTurns     int             // 总 Turn 数
+	errorTurns     int             // 触发过 RecoveryManager 的 Turn 数
+	recoveryTokens int             // 错误 Turn 累计消耗的 token 数
+
+	// 分层记忆系统
+	memoryManager *memory.Manager // 记忆管理器（nil 表示未启用）
 }
 
 func NewAgentEngine(p provider.LLMProvider, r tools.Registry, workDir string, enableThinking bool, planMode bool) *AgentEngine {
@@ -85,6 +89,12 @@ func (e *AgentEngine) Registry() tools.Registry {
 // 应在 Run() 之前调用。
 func (e *AgentEngine) SetBillingSession(s *ctxpkg.Session) {
 	e.billingSession = s
+}
+
+// SetMemoryManager 将记忆管理器注入引擎，启用分层记忆系统。
+// 应在 Run() 之前调用。
+func (e *AgentEngine) SetMemoryManager(m *memory.Manager) {
+	e.memoryManager = m
 }
 
 // Metrics 返回本次 Run() 的试错成本指标。
@@ -277,6 +287,23 @@ func (e *AgentEngine) Run(ctx context.Context, session *Session, userPrompt stri
 
 		contextHistory = append(contextHistory, systemMsg)
 
+		// ═══════════════════════════════════════════════════════════════
+		// 分层记忆注入：在 System Prompt 之后、Working Memory 之前注入
+		// - 长期记忆：用户偏好、项目状态、关键事实
+		// - 中期摘要：老对话的语义摘要
+		// ═══════════════════════════════════════════════════════════════
+		if e.memoryManager != nil {
+			longTermFacts := e.memoryManager.GetLongTermFacts()
+			midTermSummary := e.memoryManager.GetSummary()
+			if longTermFacts != "" || midTermSummary != "" {
+				memoryContent := longTermFacts + "\n" + midTermSummary
+				contextHistory = append(contextHistory, schema.Message{
+					Role:    schema.RoleSystem,
+					Content: memoryContent,
+				})
+			}
+		}
+
 		contextHistory = append(contextHistory, workingMemory...)
 
 		// 2. 【核心注入点】: 在向 Provider 发起推理前，过一遍内存压缩器！
@@ -365,6 +392,13 @@ func (e *AgentEngine) Run(ctx context.Context, session *Session, userPrompt stri
 		}
 
 		turnSpan.EndSpan() // 结束 Turn 跨度（进入下一轮前）
+
+		// ═══════════════════════════════════════════════════════════════
+		// 分层记忆：每轮结束后检查是否需要触发摘要或事实提取（异步）
+		// ═══════════════════════════════════════════════════════════════
+		if e.memoryManager != nil {
+			e.memoryManager.IncrementTurn(ctx, session)
+		}
 	}
 
 	e.totalTurns = turnCount
@@ -545,11 +579,11 @@ func (e *AgentEngine) consumeStream(ctx context.Context, ch <-chan provider.Stre
 			case provider.StreamEventToolCallBegin:
 				log.Printf("  -> 📞 [流式] 模型请求调用工具 #%d: %s (%s)\n",
 					ev.ToolCallIndex, ev.ToolCallName, ev.ToolCallID)
-					acc.Ingest(ev)
+				acc.Ingest(ev)
 
 			case provider.StreamEventToolCallArgsDelta:
-					acc.Ingest(ev)
-				}
+				acc.Ingest(ev)
+			}
 		}
 	}
 }

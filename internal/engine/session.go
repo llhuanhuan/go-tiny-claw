@@ -8,11 +8,28 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/lhuan/go-tiny-claw/internal/schema"
 )
+
+// SanitizeSessionID 将 session ID 中的非法文件名字符替换为下划线。
+// Windows 上 ':' 是 NTFS 备用数据流 (ADS) 分隔符，会导致文件写入 ADS 而非独立文件。
+func SanitizeSessionID(id string) string {
+	return strings.NewReplacer(
+		":", "_",
+		"*", "_",
+		"?", "_",
+		"\"", "_",
+		"<", "_",
+		">", "_",
+		"|", "_",
+		"/", "_",
+		"\\", "_",
+	).Replace(id)
+}
 
 // Session 代表了一次持续的人机交互过程。它负责维护该会话的完整历史。
 type Session struct {
@@ -62,7 +79,7 @@ func (s *Session) saveToDisk(msgs []schema.Message) {
 		return
 	}
 
-	filePath := filepath.Join(sessDir, fmt.Sprintf("%s.jsonl", s.ID))
+	filePath := filepath.Join(sessDir, fmt.Sprintf("%s.jsonl", SanitizeSessionID(s.ID)))
 	f, err := os.OpenFile(filePath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
 	if err != nil {
 		log.Printf("[Session] ⚠️ 打开会话文件失败: %v\n", err)
@@ -86,7 +103,23 @@ func (s *Session) saveToDisk(msgs []schema.Message) {
 // LoadFromDisk 从磁盘恢复会话历史（JSONL 格式）。
 // 在 GetOrCreate 时调用，实现跨进程断点续跑。
 func (s *Session) LoadFromDisk() error {
-	filePath := filepath.Join(s.WorkDir, ".claw", "sessions", fmt.Sprintf("%s.jsonl", s.ID))
+	sessDir := filepath.Join(s.WorkDir, ".claw", "sessions")
+	safeName := SanitizeSessionID(s.ID)
+	filePath := filepath.Join(sessDir, fmt.Sprintf("%s.jsonl", safeName))
+
+	// 自动迁移：如果安全文件名不存在，尝试从旧路径（含 : 的 ADS）迁移
+	if _, err := os.Stat(filePath); os.IsNotExist(err) {
+		legacyPath := filepath.Join(sessDir, fmt.Sprintf("%s.jsonl", s.ID))
+		if data, err := os.ReadFile(legacyPath); err == nil && len(data) > 0 {
+			if err := os.MkdirAll(sessDir, 0755); err == nil {
+				if err := os.WriteFile(filePath, data, 0644); err == nil {
+					os.Remove(legacyPath) // 清理旧的 ADS 文件
+					log.Printf("[Session] 🔄 已迁移会话文件: %s -> %s\n", legacyPath, filePath)
+				}
+			}
+		}
+	}
+
 	f, err := os.Open(filePath)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -127,6 +160,16 @@ func (s *Session) ClearHistory() {
 	defer s.mu.Unlock()
 	s.history = make([]schema.Message, 0)
 	s.UpdatedAt = time.Now()
+}
+
+// GetAllMessages 返回会话的全量历史消息（用于记忆系统）。
+// 返回的是副本，修改不会影响原始历史。
+func (s *Session) GetAllMessages() []schema.Message {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	result := make([]schema.Message, len(s.history))
+	copy(result, s.history)
+	return result
 }
 
 // GetWorkingMemory 是驾驭工程的核心！

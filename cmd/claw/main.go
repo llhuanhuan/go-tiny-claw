@@ -109,6 +109,8 @@ func runFeishu(eng *engine.AgentEngine, billingSession *ctxpkg.Session, cfg *App
 		// 为每个会话创建独立的计费 Session，实现 per-session 计费隔离
 		billing := ctxpkg.NewSession("feishu:" + sess.ID)
 		e.SetBillingSession(billing)
+		// 初始化分层记忆系统
+		InitMemoryManager(e, cfg, sess.ID)
 		return e
 	})
 
@@ -160,6 +162,8 @@ func runILink(eng *engine.AgentEngine, billingSession *ctxpkg.Session, cfg *AppC
 		// 为每个会话创建独立的计费 Session，实现 per-session 计费隔离
 		billing := ctxpkg.NewSession("ilink:" + sess.ID)
 		e.SetBillingSession(billing)
+		// 初始化分层记忆系统
+		InitMemoryManager(e, cfg, sess.ID)
 		return e
 	})
 

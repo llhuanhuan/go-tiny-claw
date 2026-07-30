@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"text/tabwriter"
 
+	"github.com/lhuan/go-tiny-claw/internal/engine"
 	"github.com/spf13/cobra"
 )
 
@@ -132,7 +133,7 @@ func cleanSessions(workDir, sessionID string) error {
 
 	if sessionID != "" {
 		// 清理指定会话
-		path := filepath.Join(sessDir, sessionID+".jsonl")
+		path := filepath.Join(sessDir, engine.SanitizeSessionID(sessionID)+".jsonl")
 		if err := os.Remove(path); err != nil {
 			if os.IsNotExist(err) {
 				fmt.Printf("会话 %s 不存在\n", sessionID)

@@ -11,6 +11,7 @@ import (
 	"syscall"
 
 	"github.com/lhuan/go-tiny-claw/internal/engine"
+	"github.com/lhuan/go-tiny-claw/internal/memory"
 	"github.com/peterh/liner"
 	"github.com/spf13/cobra"
 )
@@ -55,6 +56,7 @@ type replState struct {
 	engine      *engine.AgentEngine
 	session     *engine.Session
 	billingSess interface{ TotalTokens() int }
+	memoryMgr   *memory.Manager // 记忆管理器（可能为 nil）
 }
 
 // runREPL 启动交互式 REPL 循环。
@@ -83,10 +85,14 @@ func runREPL(sessionID string) error {
 	}
 	session := engine.GlobalSessionMgr.GetOrCreate(sessionID, b.WorkDir)
 
+	// 初始化分层记忆系统
+	memMgr := InitMemoryManager(b.Engine, cfg, sessionID)
+
 	state := &replState{
 		engine:      b.Engine,
 		session:     session,
 		billingSess: b.BillingSession,
+		memoryMgr:   memMgr,
 	}
 	state.state.Store(stateIdle)
 
@@ -166,6 +172,9 @@ func runREPL(sessionID string) error {
 		case "/history":
 			printHistory(session)
 			continue
+		case "/memory":
+			printMemory(state.memoryMgr)
+			continue
 		}
 
 		// 保存到 liner 历史
@@ -223,6 +232,33 @@ func printHistory(session *engine.Session) {
 		case "assistant":
 			fmt.Printf("  %s %s\n", colorize(ansiBlue, "[助手]"), content)
 		}
+	}
+}
+
+// printMemory 打印当前记忆状态。
+func printMemory(mgr *memory.Manager) {
+	if mgr == nil {
+		fmt.Println(colorize(ansiDim, "(记忆系统未启用)"))
+		return
+	}
+
+	fmt.Println(colorize(ansiBold, "🧠 记忆状态:"))
+	fmt.Printf("  轮次: %d\n", mgr.GetTurnCount())
+
+	summary := mgr.GetSummary()
+	if summary != "" {
+		fmt.Println(colorize(ansiBold, "\n📝 中期摘要:"))
+		fmt.Println(summary)
+	} else {
+		fmt.Println(colorize(ansiDim, "\n  中期摘要: (暂无)"))
+	}
+
+	facts := mgr.GetLongTermFacts()
+	if facts != "" {
+		fmt.Println(colorize(ansiBold, "\n📚 长期记忆:"))
+		fmt.Println(facts)
+	} else {
+		fmt.Println(colorize(ansiDim, "\n  长期记忆: (暂无)"))
 	}
 }
 
